@@ -1,7 +1,7 @@
 from __future__ import absolute_import, division, print_function, \
     with_statement
 
-from ctypes import c_char_p, c_int, c_ulonglong, byref, c_ulong, \
+from ctypes import c_char_p, c_int, c_uint, c_ulonglong, byref, \
     create_string_buffer, c_void_p
 
 from fullyconnect.crypto import util
@@ -39,22 +39,35 @@ def load_libsodium():
             raise Exception('libsodium init failed')
 
     libsodium.crypto_stream_salsa20_xor_ic.restype = c_int
-    libsodium.crypto_stream_salsa20_xor_ic.argtypes = (c_void_p, c_char_p,
-                                                       c_ulonglong,
-                                                       c_char_p, c_ulonglong,
-                                                       c_char_p)
+    libsodium.crypto_stream_salsa20_xor_ic.argtypes = (
+        c_void_p, c_char_p,  # cipher output, msg
+        c_ulonglong,  # msg len
+        c_char_p, c_ulonglong,  # nonce, uint64_t initial block counter
+        c_char_p  # key
+    )
     libsodium.crypto_stream_chacha20_xor_ic.restype = c_int
-    libsodium.crypto_stream_chacha20_xor_ic.argtypes = (c_void_p, c_char_p,
-                                                        c_ulonglong,
-                                                        c_char_p, c_ulonglong,
-                                                        c_char_p)
+    libsodium.crypto_stream_chacha20_xor_ic.argtypes = (
+        c_void_p, c_char_p,
+        c_ulonglong,
+        c_char_p, c_ulonglong,
+        c_char_p
+    )
+    if hasattr(libsodium, 'crypto_stream_xchacha20_xor_ic'):
+        libsodium.crypto_stream_xchacha20_xor_ic.restype = c_int
+        libsodium.crypto_stream_xchacha20_xor_ic.argtypes = (
+            c_void_p, c_char_p,
+            c_ulonglong,
+            c_char_p, c_ulonglong,
+            c_char_p
+        )
     libsodium.crypto_stream_chacha20_ietf_xor_ic.restype = c_int
-    libsodium.crypto_stream_chacha20_ietf_xor_ic.argtypes = (c_void_p,
-                                                             c_char_p,
-                                                             c_ulonglong,
-                                                             c_char_p,
-                                                             c_ulong,
-                                                             c_char_p)
+    libsodium.crypto_stream_chacha20_ietf_xor_ic.argtypes = (
+        c_void_p, c_char_p,
+        c_ulonglong,
+        c_char_p,
+        c_uint,  # uint32_t initial counter
+        c_char_p
+    )
 
     # chacha20-poly1305
     libsodium.crypto_aead_chacha20poly1305_encrypt.restype = c_int
@@ -155,10 +168,18 @@ class SodiumCrypto(object):
             raise Exception('Unknown cipher')
         # byte counter, not block counter
         self.counter = 0
-        self.encrypt = self.update
-        self.decrypt = self.update
-        self.encrypt_once = self.update
-        self.decrypt_once = self.update
+
+    def encrypt(self, data):
+        return self.update(data)
+
+    def decrypt(self, data):
+        return self.update(data)
+
+    def encrypt_once(self, data):
+        return self.update(data)
+
+    def decrypt_once(self, data):
+        return self.update(data)
 
     def update(self, data):
         global buf_size, buf

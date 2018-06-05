@@ -32,6 +32,8 @@ def to_str(s):
     if bytes != str:
         if type(s) == bytes:
             return s.decode('utf-8')
+        elif type(s) == bytearray:
+            return bytes(s).decode('utf-8')
     return s
 
 

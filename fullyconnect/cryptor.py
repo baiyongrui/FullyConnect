@@ -4,7 +4,7 @@ import hashlib
 import logging
 
 from fullyconnect import common
-from fullyconnect.crypto import openssl, sodium
+from fullyconnect.crypto import rc4_md5, openssl, sodium
 
 
 CIPHER_ENC_ENCRYPTION = 1
@@ -15,6 +15,7 @@ METHOD_INFO_IV_LEN = 1
 METHOD_INFO_CRYPTO = 2
 
 method_supported = {}
+method_supported.update(rc4_md5.ciphers)
 method_supported.update(openssl.ciphers)
 method_supported.update(sodium.ciphers)
 

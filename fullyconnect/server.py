@@ -1,4 +1,3 @@
-
 import sys
 import os
 import logging
@@ -11,7 +10,6 @@ from fullyconnect import shell, daemon, tcprelay, udprelay
 
 
 def main():
-    shell.check_python()
 
     config = shell.get_config()
 
