@@ -18,7 +18,9 @@ from fullyconnect.mqtt.connect import ConnectPacket, ConnectPayload, ConnectVari
 from fullyconnect.mqtt.connack import ConnackPacket, ConnackVariableHeader
 from fullyconnect.mqtt.pingresp import PingRespPacket
 
-
+logging.basicConfig(level=logging.INFO,
+                        format='%(asctime)s %(levelname)-8s %(message)s',
+                        datefmt='%Y-%m-%d %H:%M:%S')
 logger = logging.getLogger(__name__)
 
 STAGE_ADDR = 1
