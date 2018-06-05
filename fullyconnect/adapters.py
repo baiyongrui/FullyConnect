@@ -3,8 +3,6 @@
 # See the file license.txt for copying permission.
 import asyncio
 import io
-from websockets.protocol import WebSocketCommonProtocol
-from websockets.exceptions import ConnectionClosed
 from asyncio import StreamReader, StreamWriter
 import logging
 
@@ -58,75 +56,6 @@ class WriterAdapter:
         """
         Close the protocol connection
         """
-
-
-class WebSocketsReader(ReaderAdapter):
-    """
-    WebSockets API reader adapter
-    This adapter relies on WebSocketCommonProtocol to read from a WebSocket.
-    """
-    def __init__(self, protocol: WebSocketCommonProtocol):
-        self._protocol = protocol
-        self._stream = io.BytesIO(b'')
-
-    @asyncio.coroutine
-    def read(self, n=-1) -> bytes:
-        yield from self._feed_buffer(n)
-        data = self._stream.read(n)
-        return data
-
-    @asyncio.coroutine
-    def _feed_buffer(self, n=1):
-        """
-        Feed the data buffer by reading a Websocket message.
-        :param n: if given, feed buffer until it contains at least n bytes
-        """
-        buffer = bytearray(self._stream.read())
-        while len(buffer) < n:
-            try:
-                message = yield from self._protocol.recv()
-            except ConnectionClosed:
-                message = None
-            if message is None:
-                break
-            if not isinstance(message, bytes):
-                raise TypeError("message must be bytes")
-            buffer.extend(message)
-        self._stream = io.BytesIO(buffer)
-
-
-class WebSocketsWriter(WriterAdapter):
-    """
-    WebSockets API writer adapter
-    This adapter relies on WebSocketCommonProtocol to read from a WebSocket.
-    """
-    def __init__(self, protocol: WebSocketCommonProtocol):
-        self._protocol = protocol
-        self._stream = io.BytesIO(b'')
-
-    def write(self, data):
-        """
-        write some data to the protocol layer
-        """
-        self._stream.write(data)
-
-    @asyncio.coroutine
-    def drain(self):
-        """
-        Let the write buffer of the underlying transport a chance to be flushed.
-        """
-        data = self._stream.getvalue()
-        if len(data):
-            yield from self._protocol.send(data)
-        self._stream = io.BytesIO(b'')
-
-    def get_peer_info(self):
-        extra_info = self._protocol.writer.get_extra_info('peername')
-        return extra_info[0], extra_info[1]
-
-    @asyncio.coroutine
-    def close(self):
-        yield from self._protocol.close()
 
 
 class StreamReaderAdapter(ReaderAdapter):
