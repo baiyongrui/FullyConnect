@@ -128,7 +128,7 @@ class MQTTServerProtocol(asyncio.Protocol):
                 if fixed_header:
                     if fixed_header.packet_type == RESERVED_0 or fixed_header.packet_type == RESERVED_15:
                         logger.warning("%s Received reserved packet, which is forbidden: closing connection")
-                        yield from self.handle_connection_closed()
+                        break
                     else:
                         cls = packet_class(fixed_header)
                         packet = yield from cls.from_stream(self.reader, fixed_header=fixed_header)
@@ -174,7 +174,6 @@ class MQTTServerProtocol(asyncio.Protocol):
                 break
         while running_tasks:
             running_tasks.popleft().cancel()
-        # yield from self.handle_connection_closed()
         self._reader_stopped.set()
         logger.debug("%s Reader coro stopped" % self._peername)
         yield from self.stop()
