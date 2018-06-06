@@ -19,8 +19,8 @@ from fullyconnect.mqtt.connack import ConnackPacket, ConnackVariableHeader
 from fullyconnect.mqtt.pingresp import PingRespPacket
 
 logging.basicConfig(level=logging.INFO,
-                        format='%(asctime)s %(levelname)-8s %(message)s',
-                        datefmt='%Y-%m-%d %H:%M:%S')
+                    format='%(asctime)s %(levelname)-8s %(message)s',
+                    datefmt='%Y-%m-%d %H:%M:%S')
 logger = logging.getLogger(__name__)
 
 
@@ -54,7 +54,7 @@ class MQTTServerProtocol(asyncio.Protocol):
 
         self._reader_task = None
         self._keepalive_task = None
-        self.keepalive_timeout = config['timeout']
+        self._keepalive_timeout = config['timeout']
         self._reader_ready = None
         self._reader_stopped = asyncio.Event(loop=self._loop)
         self._stream_reader = StreamReader(loop=self._loop)
@@ -64,14 +64,15 @@ class MQTTServerProtocol(asyncio.Protocol):
         self._peername = transport.get_extra_info('peername')
         self._transport = transport
 
+        logging.info("Mqtt client connected from: {}.".format(self._peername))
+
         self._stream_reader.set_transport(transport)
         self.reader = StreamReaderAdapter(self._stream_reader)
         self._loop.create_task(self.start())
 
     def connection_lost(self, exc):
-        # TODO: reestablish connection
-        print("client {0} connection lost.".format(self._peername))
-        self.stop()
+        logging.info("Mqtt client connection{} lost.".format(self._peername))
+
         # TODO: close all remotes
 
         if self._stream_reader is not None:
@@ -79,6 +80,8 @@ class MQTTServerProtocol(asyncio.Protocol):
                 self._stream_reader.feed_eof()
             else:
                 self._stream_reader.set_exception(exc)
+
+        self.stop()
 
     def data_received(self, data):
         self._stream_reader.feed_data(data)
@@ -91,8 +94,8 @@ class MQTTServerProtocol(asyncio.Protocol):
         self._reader_ready = asyncio.Event(loop=self._loop)
         self._reader_task = asyncio.Task(self._reader_loop(), loop=self._loop)
         yield from self._reader_ready.wait()
-        if self.keepalive_timeout:
-            self._keepalive_task = self._loop.call_later(self.keepalive_timeout, self.handle_write_timeout)
+        if self._keepalive_timeout:
+            self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
 
     @asyncio.coroutine
     def stop(self):
@@ -109,7 +112,6 @@ class MQTTServerProtocol(asyncio.Protocol):
                 if self._transport:
                     self._transport.close()
                     self._transport = None
-                print("MQTTServer closed for peer:{0}".format(self._peername))
 
     @asyncio.coroutine
     def _reader_loop(self):
@@ -120,14 +122,14 @@ class MQTTServerProtocol(asyncio.Protocol):
                 while running_tasks and running_tasks[0].done():
                     running_tasks.popleft()
                 if len(running_tasks) > 1:
-                    logger.debug("handler running tasks: %d" % len(running_tasks))
+                    logging.debug("{} Handler running tasks: {}".format(self._peername, len(running_tasks)))
 
                 fixed_header = yield from asyncio.wait_for(
                     MQTTFixedHeader.from_stream(self.reader),
-                    self.keepalive_timeout+10, loop=self._loop)
+                    self._keepalive_timeout + 10, loop=self._loop)
                 if fixed_header:
                     if fixed_header.packet_type == RESERVED_0 or fixed_header.packet_type == RESERVED_15:
-                        logger.warning("%s Received reserved packet, which is forbidden: closing connection")
+                        logging.warning("{} Received reserved packet, which is forbidden: closing connection".format(self._peername))
                         break
                     else:
                         cls = packet_class(fixed_header)
@@ -152,30 +154,29 @@ class MQTTServerProtocol(asyncio.Protocol):
                         elif packet.fixed_header.packet_type == DISCONNECT:
                             task = ensure_future(self.handle_disconnect(packet), loop=self._loop)
                         else:
-                            logger.warning("%s Unhandled packet type: %s" %
-                                                (self._peername, packet.fixed_header.packet_type))
+                            logging.warning("{} Unhandled packet type: {}".format(self._peername, packet.fixed_header.packet_type))
                         if task:
                             running_tasks.append(task)
                 else:
-                    logger.debug("%s No more data (EOF received), stopping reader coro" % self._peername)
+                    logging.debug("{} No more data (EOF received), stopping reader coro".format(self._peername))
                     break
             except MQTTException:
-                logger.debug("Message discarded")
+                logging.debug("{} Message discarded".format(self._peername))
             except asyncio.CancelledError:
                 # logger.debug("Task cancelled, reader loop ending")
                 break
             except asyncio.TimeoutError:
-                logger.debug("%s Input stream read timeout", self._peername)
-                break;
+                logging.debug("{} Input stream read timeout".format(self._peername))
+                break
             except NoDataException:
-                logger.debug("%s No data available" % self._peername)
+                logging.debug("{} No data available".format(self._peername))
             except BaseException as e:
-                logger.warning("%s Unhandled exception in reader coro: %r" % (type(self).__name__, e))
+                logging.warning("{}:{} Unhandled exception in reader coro: {}".format(type(self).__name__, self._peername, e))
                 break
         while running_tasks:
             running_tasks.popleft().cancel()
         self._reader_stopped.set()
-        logger.debug("%s Reader coro stopped" % self._peername)
+        logging.debug("{} Reader coro stopped".format(self._peername))
         yield from self.stop()
 
     # for remote read
@@ -191,13 +192,13 @@ class MQTTServerProtocol(asyncio.Protocol):
     def _send_packet(self, packet):
         self._transport.write(packet.to_bytes())
         self._keepalive_task.cancel()
-        self._keepalive_task = self._loop.call_later(self.keepalive_timeout, self.handle_write_timeout)
+        self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
 
     def handle_write_timeout(self):
         packet = PingReqPacket()
         self._transport.write(packet.to_bytes())
         self._keepalive_task.cancel()
-        self._keepalive_task = self._loop.call_later(self.keepalive_timeout, self.handle_write_timeout)
+        self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
 
     def handle_read_timeout(self):
         self._loop.create_task(self.stop())
@@ -225,15 +226,14 @@ class MQTTServerProtocol(asyncio.Protocol):
 
                 header_result = common.parse_header(data)
                 if header_result is None:
-                    logger.error("can not parse header when handling connection from {0}:{1}"
-                                 .format(self._peername[0], self._peername[1]))
+                    logging.error("Can not parse header when handling mqtt client({}) connection{}.".format(
+                        publish_packet.topic_name, self._peername))
                     self._write_eof(publish_packet.topic_name)
                     return
 
                 addrtype, remote_addr, remote_port, header_length = header_result
-                logger.info('connecting to %s:%d from %s:%d' %
-                            (common.to_str(remote_addr), remote_port,
-                             self._peername[0], self._peername[1]))
+                logging.info("Connecting to remote {}:{} from mqtt client({}) connection{}.".format(
+                    remote_addr, remote_port, publish_packet.topic_name, self._peername))
 
                 remote = RelayRemoteProtocol(self._loop, self, publish_packet.topic_name)
                 self._topic_to_remote[publish_packet.topic_name] = remote
@@ -245,25 +245,25 @@ class MQTTServerProtocol(asyncio.Protocol):
                 remote.write(data)
         else:
             if remote is not None:
-                print("closing remote.")
+                logging.info("")
                 remote.close()
 
     @asyncio.coroutine
     def handle_pingresp(self, pingresp: PingRespPacket):
-        print("PINGRESP")
+        logging.info("Received PingRespPacket from mqtt client.")
 
     @asyncio.coroutine
     def handle_pingreq(self, pingreq: PingReqPacket):
-        print("send PINGREQ")
-        pingresp = PingRespPacket()
-        self._send_packet(pingresp)
+        logging.info("Received PingRespPacket from mqtt client.")
+        ping_resp = PingRespPacket()
+        self._send_packet(ping_resp)
 
     async def create_connection(self, remote, host, port):
         try:
             #TODO handle pending task
             transport, protocol = await self._loop.create_connection(lambda: remote, host, port)
         except OSError as e:
-            logger.error("{0} when connecting to {1}:{2} from {3}:{4}".format(e, host, port, self._peername[0], self._peername[1]))
+            logging.error("{} when creating remote connection to {}:{} from mqtt connection{}.".format(e, host, port, self._peername))
             self.remove_topic(remote.client_topic)
 
     def remove_topic(self, topic):
@@ -307,7 +307,7 @@ class RelayRemoteProtocol(asyncio.Protocol):
         self._timeout_handle = self._loop.call_later(self._timeout, self.timeout_handler)
 
     def connection_lost(self, exc):
-        print("remote {0} connection lost.".format(self._peername))
+        logging.info("Remote connection{} lost.".format(self._peername))
         self._transport = None
         if self._server is not None:
             self._server.remove_topic(self.client_topic)
@@ -325,21 +325,16 @@ class RelayRemoteProtocol(asyncio.Protocol):
         if not self._connected:
             self._write_pending_data.append(data)
         else:
-            # if len(self._write_pending_data) > 0:
-            #     self._write_pending_data.append(data)
-            #     data = b''.join(self._write_pending_data)
-            #     self._write_pending_data = []
             self._transport.write(data)
 
-    def close(self):    # closed by local
-        self._server = None
+    def close(self):
         if self._transport:
             self._transport.close()
 
     def timeout_handler(self):
         after = self._last_activity - self._loop.time() + self._timeout
         if after < 0:
-            logger.warning("connection from {0}:{1} timeout".format(self._peername[0], self._peername[1]))
+            logging.warning("Remote connection{} timeout".format(self._peername))
             self.close()
         else:
             self._timeout_handle = self._loop.call_later(after, self.timeout_handler)

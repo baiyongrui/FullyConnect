@@ -91,8 +91,8 @@ class MQTTClientProtocol(asyncio.Protocol):
             # TODO handle pending task
             transport, protocol = await self._loop.create_connection(lambda: self, self._config['address'], self._config['port'])
         except OSError as e:
-            logger.error("{0} when connecting to mqtt server({1}:{2})".format(e, self._config['address'], self._config['port']))
-            logger.error("Reconnection will be performed after 5s...")
+            logging.error("{0} when connecting to mqtt server({1}:{2})".format(e, self._config['address'], self._config['port']))
+            logging.error("Reconnection will be performed after 5s...")
             await asyncio.sleep(5)     # TODO:retry interval
             self._loop.create_task(self.create_connection())
 
@@ -107,7 +107,6 @@ class MQTTClientProtocol(asyncio.Protocol):
     def connection_lost(self, exc):
         logging.info("Lost connection with mqtt server{0}".format(self._peername))
 
-        self.stop()
         self._topic_to_clients = {}
 
         if self._stream_reader is not None:
@@ -115,6 +114,8 @@ class MQTTClientProtocol(asyncio.Protocol):
                 self._stream_reader.feed_eof()
             else:
                 self._stream_reader.set_exception(exc)
+
+        self.stop()
 
         self.reestablish_connection()
 
@@ -144,7 +145,7 @@ class MQTTClientProtocol(asyncio.Protocol):
         connect_packet = ConnectPacket(vh=connect_vh, payload=connect_payload)
         self._send_packet(connect_packet)
 
-        logging.info("Creating connection to mqtt server")
+        logging.info("Creating connection to mqtt server.")
 
     @asyncio.coroutine
     def stop(self):
@@ -172,14 +173,14 @@ class MQTTClientProtocol(asyncio.Protocol):
                 while running_tasks and running_tasks[0].done():
                     running_tasks.popleft()
                 if len(running_tasks) > 1:
-                    logger.debug("handler running tasks: %d" % len(running_tasks))
+                    logging.debug("{} Handler running tasks: {}".format(self._peername, len(running_tasks)))
 
                 fixed_header = yield from asyncio.wait_for(
                     MQTTFixedHeader.from_stream(self._reader),
                     self._keepalive_timeout + 10, loop=self._loop)
                 if fixed_header:
                     if fixed_header.packet_type == RESERVED_0 or fixed_header.packet_type == RESERVED_15:
-                        logger.warning("%s Received reserved packet, which is forbidden: closing connection")
+                        logging.warning("{} Received reserved packet, which is forbidden: closing connection".format(self._peername))
                         break
                     else:
                         cls = packet_class(fixed_header)
@@ -205,29 +206,30 @@ class MQTTClientProtocol(asyncio.Protocol):
                         elif packet.fixed_header.packet_type == DISCONNECT:
                             task = ensure_future(self.handle_disconnect(packet), loop=self._loop)
                         else:
-                            logger.warning("%s Unhandled packet type: %s" % packet.fixed_header.packet_type)
+                            logging.warning("{} Unhandled packet type: {}".format(self._peername, packet.fixed_header.packet_type))
                         if task:
                             running_tasks.append(task)
                 else:
-                    logger.debug("%s No more data (EOF received), stopping reader coro")
+                    logging.debug("{} No more data (EOF received), stopping reader coro".format(self._peername))
                     break
             except MQTTException:
-                logger.debug("Message discarded")
+                logging.debug("{} Message discarded".format(self._peername))
             except asyncio.CancelledError:
                 # logger.debug("Task cancelled, reader loop ending")
                 break
             except asyncio.TimeoutError:
-                logging.debug("%s Input stream read timeout")
-                break;
+                logging.debug("{} Input stream read timeout".format(self._peername))
+                break
             except NoDataException:
-                logger.debug("%s No data available")
+                logging.debug("{} No data available".format(self._peername))
             except BaseException as e:
-                logger.warning("%s Unhandled exception in reader coro: %r" % (type(self).__name__, e))
+                logging.warning(
+                    "{}:{} Unhandled exception in reader coro: {}".format(type(self).__name__, self._peername, e))
                 break
         while running_tasks:
             running_tasks.popleft().cancel()
         self._reader_stopped.set()
-        logging.debug("mqtt_client reader coro stopped")
+        logging.debug("{} Reader coro stopped".format(self._peername))
         yield from self.stop()
 
     def write(self, data: bytes, topic):
@@ -334,10 +336,10 @@ class RelayServerProtocol(asyncio.Protocol):
         self._last_activity = self._loop.time()
         self._timeout_handle = self._loop.call_later(self._timeout, self.timeout_handler)
 
-        logging.info("Client connected from: {0} ({1}).".format(self._peername, self._topic))
+        logging.info("Client({}) connected from: {}.".format(self._topic, self._peername))
 
     def connection_lost(self, exc):
-        logging.info("Client({0}) connection{1} lost.".format(self._topic, self._peername))
+        logging.info("Client({}) connection{} lost.".format(self._topic, self._peername))
         if not self._manual_close:
             self._mqtt_client.write_eof(self._topic)
         self._transport = None
@@ -364,7 +366,7 @@ class RelayServerProtocol(asyncio.Protocol):
     def handle_stage_addr(self, data):
         header_result = common.parse_header(data)
         if header_result is None:
-            logger.error("can not parse header when handling client connection{0}".format(self._peername))
+            logging.error("Can not parse header when handling client connection{0}".format(self._peername))
             self.close()
             return
 
@@ -382,7 +384,7 @@ class RelayServerProtocol(asyncio.Protocol):
     def timeout_handler(self):
         after = self._last_activity - self._loop.time() + self._timeout
         if after < 0:
-            logger.warning("Client({0}) connection{1} timeout.".format(self._topic, self._peername))
+            logging.warning("Client({0}) connection{1} timeout.".format(self._topic, self._peername))
             self.close()
         else:
             self._timeout_handle = self._loop.call_later(after, self.timeout_handler)
