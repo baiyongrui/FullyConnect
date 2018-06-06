@@ -254,7 +254,7 @@ class MQTTServerProtocol(asyncio.Protocol):
 
     @asyncio.coroutine
     def handle_pingreq(self, pingreq: PingReqPacket):
-        logging.info("Received PingRespPacket from mqtt client.")
+        logging.info("Sending PingRespPacket from mqtt client.")
         ping_resp = PingRespPacket()
         self._send_packet(ping_resp)
 
