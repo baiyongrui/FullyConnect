@@ -233,7 +233,7 @@ class MQTTServerProtocol(asyncio.Protocol):
 
                 addrtype, remote_addr, remote_port, header_length = header_result
                 logging.info("Connecting to remote {}:{} from mqtt client({}) connection{}.".format(
-                    remote_addr, remote_port, publish_packet.topic_name, self._peername))
+                    common.to_str(remote_addr), remote_port, publish_packet.topic_name, self._peername))
 
                 remote = RelayRemoteProtocol(self._loop, self, publish_packet.topic_name)
                 self._topic_to_remote[publish_packet.topic_name] = remote
@@ -245,7 +245,6 @@ class MQTTServerProtocol(asyncio.Protocol):
                 remote.write(data)
         else:
             if remote is not None:
-                logging.info("")
                 remote.close()
 
     @asyncio.coroutine
@@ -254,7 +253,7 @@ class MQTTServerProtocol(asyncio.Protocol):
 
     @asyncio.coroutine
     def handle_pingreq(self, pingreq: PingReqPacket):
-        logging.info("Sending PingRespPacket from mqtt client.")
+        logging.info("Received PingRepPacket from mqtt client, replying PingRespPacket.")
         ping_resp = PingRespPacket()
         self._send_packet(ping_resp)
 
