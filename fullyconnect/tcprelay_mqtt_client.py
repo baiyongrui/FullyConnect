@@ -139,9 +139,9 @@ class MQTTClientProtocol(asyncio.Protocol):
             self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
 
         # send connect packet
-        # TODO: need password
         connect_vh = ConnectVariableHeader(keep_alive=self._keepalive_timeout)
-        connect_payload = ConnectPayload(client_id=ConnectPayload.gen_client_id())
+        connect_vh.password_flag = True
+        connect_payload = ConnectPayload(client_id=ConnectPayload.gen_client_id(), password=self._encryptor.password)
         connect_packet = ConnectPacket(vh=connect_vh, payload=connect_payload)
         self._send_packet(connect_packet)
 
@@ -327,7 +327,6 @@ class RelayServerProtocol(asyncio.Protocol):
         self._topic = next(f_topic_generator)
         self._mqtt_client.register_client_topic(self._topic, self)
 
-        # test
         self._encryptor = cryptor.Cryptor(config['password'], config['method'])
 
     def connection_made(self, transport):
@@ -349,15 +348,15 @@ class RelayServerProtocol(asyncio.Protocol):
 
     def data_received(self, data):
         # self._last_activity = self._loop.time()
-        #
-        # elif self._stage == STAGE_ADDR:
-        #     self.handle_stage_addr(data)
-        data = self._encryptor.decrypt(data)
-        self._mqtt_client.write(data, self._topic)
+
+        if self._stage == STAGE_STREAM:
+            data = self._encryptor.decrypt(data)
+            self._mqtt_client.write(data, self._topic)
+        elif self._stage == STAGE_ADDR:
+            self.handle_stage_addr(data)
 
     # handle remote read
     def write(self, data):
-        # TODO: test
         data = self._encryptor.encrypt(data)
         self._transport.write(data)
 
@@ -374,7 +373,7 @@ class RelayServerProtocol(asyncio.Protocol):
 
         self._stage = STAGE_STREAM
         if len(data) > header_length:
-            self._mqtt_client.write(data[header_length:])
+            self._mqtt_client.write(data[header_length:], self._topic)
 
     def close(self):
         self._manual_close = True

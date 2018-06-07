@@ -205,13 +205,18 @@ class MQTTServerProtocol(asyncio.Protocol):
 
     @asyncio.coroutine
     def handle_connect(self, connect: ConnectPacket):
-        # TODO: check password and save
-        # if connect.password == "":
-        connack_vh = ConnackVariableHeader(return_code=0)
+        return_code = 0
+
+        if connect.password != self._encryptor.password:
+            return_code = 4
+            logging.warning("Invalid ConnectPacket password from mqtt client connection{}!".format(self._peername))
+
+        connack_vh = ConnackVariableHeader(return_code=return_code)
         connack = ConnackPacket(variable_header=connack_vh)
         self._send_packet(connack)
-        # else:
-        #     self._loop.create_task(self.stop())
+
+        if return_code != 0:
+            self._loop.create_task(self.stop())
 
     @asyncio.coroutine
     def handle_publish(self, publish_packet: PublishPacket):
