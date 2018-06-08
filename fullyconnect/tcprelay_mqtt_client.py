@@ -122,7 +122,7 @@ class MQTTClientProtocol(asyncio.Protocol):
     def reestablish_connection(self):
         self._stream_reader = StreamReader(loop=self._loop)
         self._encryptor = cryptor.Cryptor(self._encryptor.password, self._encryptor.method)
-        self._loop.call_later(5, self._loop.create_task(self.create_connection()))
+        self._loop.call_later(5, lambda: self._loop.create_task(self.create_connection()))
 
     def data_received(self, data):
         self._stream_reader.feed_data(data)
@@ -141,7 +141,8 @@ class MQTTClientProtocol(asyncio.Protocol):
         # send connect packet
         connect_vh = ConnectVariableHeader(keep_alive=self._keepalive_timeout)
         connect_vh.password_flag = True
-        connect_payload = ConnectPayload(client_id=ConnectPayload.gen_client_id(), password=self._encryptor.password)
+        password = self._encryptor.encrypt(self._encryptor.password.encode('utf-8'))
+        connect_payload = ConnectPayload(client_id=ConnectPayload.gen_client_id(), password=password)
         connect_packet = ConnectPacket(vh=connect_vh, payload=connect_payload)
         self._send_packet(connect_packet)
 
@@ -349,10 +350,10 @@ class RelayServerProtocol(asyncio.Protocol):
     def data_received(self, data):
         # self._last_activity = self._loop.time()
 
+        data = self._encryptor.decrypt(data)
         if self._stage == STAGE_STREAM:
-            data = self._encryptor.decrypt(data)
             self._mqtt_client.write(data, self._topic)
-        elif self._stage == STAGE_ADDR:
+        elif self._stage == STAGE_ADDR:     # Check
             self.handle_stage_addr(data)
 
     # handle remote read
@@ -372,8 +373,7 @@ class RelayServerProtocol(asyncio.Protocol):
         addrtype, remote_addr, remote_port, header_length = header_result
 
         self._stage = STAGE_STREAM
-        if len(data) > header_length:
-            self._mqtt_client.write(data[header_length:], self._topic)
+        self._mqtt_client.write(data, self._topic)
 
     def close(self):
         self._manual_close = True
@@ -391,7 +391,7 @@ class RelayServerProtocol(asyncio.Protocol):
 
 if __name__ == "__main__":
 
-    config = {"mqtt_client": {"password": "", "method": "chacha20", "timeout": 60, "address":"127.0.0.1", "port": 1883},
+    config = {"mqtt_client": {"password": "", "method": "aes-128-cfb", "timeout": 60, "address":"127.0.0.1", "port": 1883},
               "server": {"password": "", "method": "rc4-md5", "timeout": 60, "port": 1370}}
 
     server = TCPRelayServer(config)

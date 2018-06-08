@@ -58,7 +58,8 @@ class MQTTServerProtocol(asyncio.Protocol):
         self._reader_ready = None
         self._reader_stopped = asyncio.Event(loop=self._loop)
         self._stream_reader = StreamReader(loop=self._loop)
-        self.reader = None
+        self._reader = None
+        self._approved = False
 
     def connection_made(self, transport):
         self._peername = transport.get_extra_info('peername')
@@ -67,7 +68,7 @@ class MQTTServerProtocol(asyncio.Protocol):
         logging.info("Mqtt client connected from: {}.".format(self._peername))
 
         self._stream_reader.set_transport(transport)
-        self.reader = StreamReaderAdapter(self._stream_reader)
+        self._reader = StreamReaderAdapter(self._stream_reader)
         self._loop.create_task(self.start())
 
     def connection_lost(self, exc):
@@ -125,7 +126,7 @@ class MQTTServerProtocol(asyncio.Protocol):
                     logging.debug("{} Handler running tasks: {}".format(self._peername, len(running_tasks)))
 
                 fixed_header = yield from asyncio.wait_for(
-                    MQTTFixedHeader.from_stream(self.reader),
+                    MQTTFixedHeader.from_stream(self._reader),
                     self._keepalive_timeout + 10, loop=self._loop)
                 if fixed_header:
                     if fixed_header.packet_type == RESERVED_0 or fixed_header.packet_type == RESERVED_15:
@@ -133,7 +134,7 @@ class MQTTServerProtocol(asyncio.Protocol):
                         break
                     else:
                         cls = packet_class(fixed_header)
-                        packet = yield from cls.from_stream(self.reader, fixed_header=fixed_header)
+                        packet = yield from cls.from_stream(self._reader, fixed_header=fixed_header)
                         task = None
                         if packet.fixed_header.packet_type == CONNECT:
                             task = ensure_future(self.handle_connect(packet), loop=self._loop)
@@ -154,6 +155,7 @@ class MQTTServerProtocol(asyncio.Protocol):
                         elif packet.fixed_header.packet_type == DISCONNECT:
                             task = ensure_future(self.handle_disconnect(packet), loop=self._loop)
                         else:
+                            # TODO: handle unknow packet type
                             logging.warning("{} Unhandled packet type: {}".format(self._peername, packet.fixed_header.packet_type))
                         if task:
                             running_tasks.append(task)
@@ -207,10 +209,13 @@ class MQTTServerProtocol(asyncio.Protocol):
     def handle_connect(self, connect: ConnectPacket):
         return_code = 0
 
-        if connect.password != self._encryptor.password:
+        password = self._encryptor.decrypt(connect.password)
+        password = password.decode('utf-8')
+        if password != self._encryptor.password:
             return_code = 4
             logging.warning("Invalid ConnectPacket password from mqtt client connection{}!".format(self._peername))
 
+        self._approved = True
         connack_vh = ConnackVariableHeader(return_code=return_code)
         connack = ConnackPacket(variable_header=connack_vh)
         self._send_packet(connack)
@@ -220,6 +225,11 @@ class MQTTServerProtocol(asyncio.Protocol):
 
     @asyncio.coroutine
     def handle_publish(self, publish_packet: PublishPacket):
+
+        if not self._approved:
+            self._loop.create_task(self.stop())
+            return
+
         data = bytes(publish_packet.data)
         remote = self._topic_to_remote.get(publish_packet.topic_name, None)
         if not publish_packet.retain_flag:
@@ -345,7 +355,7 @@ class RelayRemoteProtocol(asyncio.Protocol):
 
 
 if __name__ == "__main__":
-    server = TCPRelayServer({"password": "", "method": "chacha20", "timeout": 60, "port": 1883})
+    server = TCPRelayServer({"password": "", "method": "aes-128-cfb", "timeout": 60, "port": 1883})
     import uvloop
     loop = uvloop.new_event_loop()
     asyncio.set_event_loop(loop)

@@ -75,6 +75,22 @@ def decode_string(reader) -> bytes:
 
 
 @asyncio.coroutine
+def decode_bytes_string(reader) -> bytes:
+    """
+    Read a string from a reader and decode it according to MQTT string specification
+    :param reader: Stream reader
+    :return: UTF-8 string read from stream
+    """
+    length_bytes = yield from read_or_raise(reader, 2)
+    str_length = unpack("!H", length_bytes)
+    if str_length[0]:
+        byte_str = yield from read_or_raise(reader, str_length[0])
+        return byte_str
+    else:
+        return b''
+
+
+@asyncio.coroutine
 def decode_data_with_length(reader) -> bytes:
     """
     Read data from a reader. Data is prefixed with 2 bytes length
@@ -89,6 +105,11 @@ def decode_data_with_length(reader) -> bytes:
 
 def encode_string(string: str) -> bytes:
     data = string.encode(encoding='utf-8')
+    data_length = len(data)
+    return int_to_bytes(data_length, 2) + data
+
+
+def encode_byte_string(data: bytes) -> bytes:
     data_length = len(data)
     return int_to_bytes(data_length, 2) + data
 

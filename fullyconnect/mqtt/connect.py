@@ -3,7 +3,8 @@
 # See the file license.txt for copying permission.
 import asyncio
 
-from fullyconnect.mqtt_codecs import bytes_to_int, decode_data_with_length, decode_string, encode_data_with_length, encode_string, int_to_bytes, read_or_raise
+from fullyconnect.mqtt_codecs import bytes_to_int, decode_data_with_length, decode_string, decode_bytes_string,\
+    encode_data_with_length, encode_string, encode_byte_string, int_to_bytes, read_or_raise
 from fullyconnect.mqtt.packet import MQTTPacket, MQTTFixedHeader, CONNECT, MQTTVariableHeader, MQTTPayload
 from fullyconnect.errors import fullyconnectException, NoDataException
 from fullyconnect.adapters import ReaderAdapter
@@ -183,7 +184,7 @@ class ConnectPayload(MQTTPayload):
 
         if variable_header.password_flag:
             try:
-                payload.password = yield from decode_string(reader)
+                payload.password = yield from decode_bytes_string(reader)
             except NoDataException:
                 payload.password = None
 
@@ -202,7 +203,8 @@ class ConnectPayload(MQTTPayload):
             out.extend(encode_string(self.username))
         # password
         if variable_header.password_flag:
-            out.extend(encode_string(self.password))
+            # out.extend(encode_string(self.password))
+            out.extend(encode_byte_string(self.password))
 
         return out
 
