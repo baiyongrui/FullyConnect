@@ -89,8 +89,11 @@ class OpenSSLCryptoBase(object):
         if not self._ctx:
             raise Exception('can not create cipher context')
 
-        self.encrypt_once = self.update
-        self.decrypt_once = self.update
+    def encrypt_once(self, data):
+        return self.update(data)
+
+    def decrypt_once(self, data):
+        return self.update(data)
 
     def update(self, data):
         """
@@ -118,6 +121,7 @@ class OpenSSLCryptoBase(object):
         if self._ctx:
             ctx_cleanup(self._ctx)
             libcrypto.EVP_CIPHER_CTX_free(self._ctx)
+            self._ctx = None
 
 
 class OpenSSLAeadCrypto(OpenSSLCryptoBase, AeadCryptoBase):
@@ -125,7 +129,7 @@ class OpenSSLAeadCrypto(OpenSSLCryptoBase, AeadCryptoBase):
     Implement OpenSSL Aead mode: gcm, ocb
     """
     def __init__(self, cipher_name, key, iv, op):
-        super(OpenSSLAeadCrypto, self).__init__(cipher_name)
+        OpenSSLCryptoBase.__init__(self, cipher_name)
         AeadCryptoBase.__init__(self, cipher_name, key, iv, op)
 
         key_ptr = c_char_p(self._skey)
@@ -147,6 +151,7 @@ class OpenSSLAeadCrypto(OpenSSLCryptoBase, AeadCryptoBase):
             None
         )
         if not r:
+            self.clean()
             raise Exception('Set ivlen failed')
 
         self.cipher_ctx_init()
@@ -183,6 +188,7 @@ class OpenSSLAeadCrypto(OpenSSLCryptoBase, AeadCryptoBase):
             c_int(tag_len), c_char_p(tag)
         )
         if not r:
+            self.clean()
             raise Exception('Set tag failed')
 
     def get_tag(self):
@@ -198,6 +204,7 @@ class OpenSSLAeadCrypto(OpenSSLCryptoBase, AeadCryptoBase):
             c_int(tag_len), byref(tag_buf)
         )
         if not r:
+            self.clean()
             raise Exception('Get tag failed')
         return tag_buf.raw[:tag_len]
 
@@ -213,6 +220,7 @@ class OpenSSLAeadCrypto(OpenSSLCryptoBase, AeadCryptoBase):
             byref(buf), byref(cipher_out_len)
         )
         if not r:
+            self.clean()
             # print(self._nonce.raw, r, cipher_out_len)
             raise Exception('Finalize cipher failed')
         return buf.raw[:cipher_out_len.value]
@@ -237,6 +245,7 @@ class OpenSSLAeadCrypto(OpenSSLCryptoBase, AeadCryptoBase):
         """
         clen = len(data)
         if clen < self._tlen:
+            self.clean()
             raise Exception('Data too short')
 
         self.set_tag(data[clen - self._tlen:])
@@ -244,13 +253,19 @@ class OpenSSLAeadCrypto(OpenSSLCryptoBase, AeadCryptoBase):
         self.cipher_ctx_init()
         return plaintext
 
+    def encrypt_once(self, data):
+        return self.aead_encrypt(data)
+
+    def decrypt_once(self, data):
+        return self.aead_decrypt(data)
+
 
 class OpenSSLStreamCrypto(OpenSSLCryptoBase):
     """
     Crypto for stream modes: cfb, ofb, ctr
     """
     def __init__(self, cipher_name, key, iv, op):
-        super(OpenSSLStreamCrypto, self).__init__(cipher_name)
+        OpenSSLCryptoBase.__init__(self, cipher_name)
         key_ptr = c_char_p(key)
         iv_ptr = c_char_p(iv)
         r = libcrypto.EVP_CipherInit_ex(self._ctx, self._cipher, None,
@@ -258,8 +273,12 @@ class OpenSSLStreamCrypto(OpenSSLCryptoBase):
         if not r:
             self.clean()
             raise Exception('can not initialize cipher context')
-        self.encrypt = self.update
-        self.decrypt = self.update
+
+    def encrypt(self, data):
+        return self.update(data)
+
+    def decrypt(self, data):
+        return self.update(data)
 
 
 ciphers = {
