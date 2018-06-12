@@ -74,8 +74,6 @@ class MQTTServerProtocol(asyncio.Protocol):
     def connection_lost(self, exc):
         logging.info("Mqtt client connection{} lost.".format(self._peername))
 
-        # TODO: close all remotes
-
         if self._stream_reader is not None:
             if exc is None:
                 self._stream_reader.feed_eof()
@@ -114,6 +112,9 @@ class MQTTServerProtocol(asyncio.Protocol):
                     self._transport.close()
                     self._transport = None
 
+                    for topic, remote in self._topic_to_remote.items():
+                        remote.close()
+
     @asyncio.coroutine
     def _reader_loop(self):
         running_tasks = collections.deque()
@@ -143,7 +144,8 @@ class MQTTServerProtocol(asyncio.Protocol):
                         elif packet.fixed_header.packet_type == PINGRESP:
                             task = ensure_future(self.handle_pingresp(packet), loop=self._loop)
                         elif packet.fixed_header.packet_type == PUBLISH:
-                            task = ensure_future(self.handle_publish(packet), loop=self._loop)
+                            # task = ensure_future(self.handle_publish(packet), loop=self._loop)
+                            self.handle_publish(packet)
                         # elif packet.fixed_header.packet_type == SUBSCRIBE:
                         #     task = ensure_future(self.handle_subscribe(packet), loop=self._loop)
                         # elif packet.fixed_header.packet_type == UNSUBSCRIBE:
@@ -223,7 +225,7 @@ class MQTTServerProtocol(asyncio.Protocol):
         if return_code != 0:
             self._loop.create_task(self.stop())
 
-    @asyncio.coroutine
+    # @asyncio.coroutine
     def handle_publish(self, publish_packet: PublishPacket):
 
         if not self._approved:
@@ -281,7 +283,8 @@ class MQTTServerProtocol(asyncio.Protocol):
             self.remove_topic(remote.client_topic)
 
     def remove_topic(self, topic):
-        self._write_eof(topic)
+        if self._transport is not None:
+            self._write_eof(topic)
         self._topic_to_remote.pop(topic, None)
 
 
