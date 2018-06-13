@@ -18,7 +18,7 @@ from fullyconnect.mqtt.connect import ConnectPacket, ConnectPayload, ConnectVari
 from fullyconnect.mqtt.connack import ConnackPacket, ConnackVariableHeader
 from fullyconnect.mqtt.pingresp import PingRespPacket
 
-logging.basicConfig(level=logging.INFO,
+logging.basicConfig(level=logging.DEBUG,
                     format='%(asctime)s %(levelname)-8s %(message)s',
                     datefmt='%Y-%m-%d %H:%M:%S')
 logger = logging.getLogger(__name__)
@@ -210,14 +210,15 @@ class MQTTServerProtocol(asyncio.Protocol):
     @asyncio.coroutine
     def handle_connect(self, connect: ConnectPacket):
         return_code = 0
+        self._approved = True
 
         password = self._encryptor.decrypt(connect.password)
         password = password.decode('utf-8')
         if password != self._encryptor.password:
             return_code = 4
+            self._approved = False
             logging.warning("Invalid ConnectPacket password from mqtt client connection{}!".format(self._peername))
 
-        self._approved = True
         connack_vh = ConnackVariableHeader(return_code=return_code)
         connack = ConnackPacket(variable_header=connack_vh)
         self._send_packet(connack)

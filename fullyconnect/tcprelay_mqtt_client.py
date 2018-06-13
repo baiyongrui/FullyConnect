@@ -18,7 +18,7 @@ from fullyconnect.mqtt.connect import ConnectPacket, ConnectPayload, ConnectVari
 from fullyconnect.mqtt.connack import ConnackPacket, ConnackVariableHeader
 from fullyconnect.mqtt.pingresp import PingRespPacket
 
-logging.basicConfig(level=logging.INFO,
+logging.basicConfig(level=logging.DEBUG,
                         format='%(asctime)s %(levelname)-8s %(message)s',
                         datefmt='%Y-%m-%d %H:%M:%S')
 logger = logging.getLogger(__name__)
@@ -69,7 +69,7 @@ class MQTTClientProtocol(asyncio.Protocol):
         self._config = config
 
         self._transport = None
-        self._write_pending_data = []
+        self._write_pending_data_topic = []     # tuple (data, topic)
         self._connected = False
 
         self._encryptor = cryptor.Cryptor(self._config['password'], self._config['method'])
@@ -121,7 +121,7 @@ class MQTTClientProtocol(asyncio.Protocol):
 
     def reestablish_connection(self):
         self._stream_reader = StreamReader(loop=self._loop)
-        self._encryptor = cryptor.Cryptor(self._encryptor.password, self._encryptor.method)
+        self._encryptor = cryptor.Cryptor(self._config['password'], self._config['method'])
         self._loop.call_later(5, lambda: self._loop.create_task(self.create_connection()))
 
     def data_received(self, data):
@@ -234,11 +234,11 @@ class MQTTClientProtocol(asyncio.Protocol):
         yield from self.stop()
 
     def write(self, data: bytes, topic):
-        data = self._encryptor.encrypt(data)
-        packet = PublishPacket.build(topic, data, None, dup_flag=0, qos=0, retain=0)
         if not self._connected:
-            self._write_pending_data.append(packet.to_bytes())
+            self._write_pending_data_topic((data, topic))
         else:
+            data = self._encryptor.encrypt(data)
+            packet = PublishPacket.build(topic, data, None, dup_flag=0, qos=0, retain=0)
             self._send_packet(packet)
 
     def write_eof(self, topic):
@@ -265,10 +265,12 @@ class MQTTClientProtocol(asyncio.Protocol):
             self._connected = True
             logging.info("Connection to mqtt server established!")
 
-            if len(self._write_pending_data) > 0:
-                data = b''.join(self._write_pending_data)
-                self._write_pending_data = []
-                self._transport.write(data)
+            if len(self._write_pending_data_topic) > 0:
+                for data, topic in self._write_pending_data_topic:
+                    data = self._encryptor.encrypt(data)
+                    packet = PublishPacket.build(topic, data, None, dup_flag=0, qos=0, retain=0)
+                    self._transport.write(packet.to_bytes())
+                self._write_pending_data_topic = []
                 self._keepalive_task.cancel()
                 self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
         else:
