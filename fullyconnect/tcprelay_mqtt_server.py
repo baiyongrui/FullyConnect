@@ -1,11 +1,11 @@
 import collections
 import asyncio
-from asyncio import StreamReader
+from asyncio import StreamReader, StreamWriter
 from asyncio import ensure_future
 import logging
 
 from fullyconnect import cryptor, common
-from fullyconnect.adapters import StreamReaderAdapter
+from fullyconnect.adapters import StreamReaderAdapter, FlowControlMixin
 from fullyconnect.mqtt import packet_class
 from fullyconnect.errors import fullyconnectException, MQTTException, NoDataException
 from fullyconnect.mqtt.packet import (
@@ -42,9 +42,10 @@ class TCPRelayServer:
         self._loop.run_until_complete(self._server.wait_closed())
 
 
-class MQTTServerProtocol(asyncio.Protocol):
+class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
 
     def __init__(self, loop, config):
+        super().__init__(loop=loop)
         self._loop = loop
         self._transport = None
         self._encryptor = cryptor.Cryptor(config['password'], config['method'])
@@ -58,6 +59,7 @@ class MQTTServerProtocol(asyncio.Protocol):
         self._reader_ready = None
         self._reader_stopped = asyncio.Event(loop=self._loop)
         self._stream_reader = StreamReader(loop=self._loop)
+        self._stream_writer = None
         self._reader = None
         self._approved = False
 
@@ -69,6 +71,9 @@ class MQTTServerProtocol(asyncio.Protocol):
 
         self._stream_reader.set_transport(transport)
         self._reader = StreamReaderAdapter(self._stream_reader)
+        self._stream_writer = StreamWriter(transport, self,
+                                           self._stream_reader,
+                                           self._loop)
         self._loop.create_task(self.start())
 
     def connection_lost(self, exc):
@@ -187,14 +192,14 @@ class MQTTServerProtocol(asyncio.Protocol):
     def write(self, data, client_topic):
         data = self._encryptor.encrypt(data)
         packet = PublishPacket.build(client_topic, data, None, dup_flag=0, qos=0, retain=0)
-        self._send_packet(packet)
+        ensure_future(self._send_packet(packet), loop=self._loop)
 
     def _write_eof(self, client_topic):
         packet = PublishPacket.build(client_topic, b'', None, dup_flag=0, qos=0, retain=1)
-        self._send_packet(packet)
+        ensure_future(self._send_packet(packet), loop=self._loop)
         
     def _send_packet(self, packet):
-        self._transport.write(packet.to_bytes())
+        yield from packet.to_stream(self._stream_writer)
         self._keepalive_task.cancel()
         self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
 
@@ -221,7 +226,7 @@ class MQTTServerProtocol(asyncio.Protocol):
 
         connack_vh = ConnackVariableHeader(return_code=return_code)
         connack = ConnackPacket(variable_header=connack_vh)
-        self._send_packet(connack)
+        yield from self._send_packet(connack)
 
         if return_code != 0:
             self._loop.create_task(self.stop())
@@ -273,7 +278,7 @@ class MQTTServerProtocol(asyncio.Protocol):
     def handle_pingreq(self, pingreq: PingReqPacket):
         logging.info("Received PingRepPacket from mqtt client, replying PingRespPacket.")
         ping_resp = PingRespPacket()
-        self._send_packet(ping_resp)
+        yield from self._send_packet(ping_resp)
 
     async def create_connection(self, remote, host, port):
         try:

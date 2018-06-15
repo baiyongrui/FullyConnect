@@ -1,11 +1,11 @@
 import collections
 import asyncio
-from asyncio import StreamReader
+from asyncio import StreamReader, StreamWriter
 from asyncio import ensure_future
 import logging
 
 from fullyconnect import cryptor, common
-from fullyconnect.adapters import StreamReaderAdapter
+from fullyconnect.adapters import StreamReaderAdapter, FlowControlMixin
 from fullyconnect.mqtt import packet_class
 from fullyconnect.errors import fullyconnectException, MQTTException, NoDataException
 from fullyconnect.mqtt.packet import (
@@ -62,9 +62,10 @@ class TCPRelayServer:
         self._loop.run_until_complete(self._server.wait_closed())
 
 
-class MQTTClientProtocol(asyncio.Protocol):
+class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
 
     def __init__(self, loop, config):
+        super().__init__(loop=loop)
         self._loop = loop
         self._config = config
 
@@ -82,6 +83,7 @@ class MQTTClientProtocol(asyncio.Protocol):
         self._reader_ready = None
         self._reader_stopped = asyncio.Event(loop=self._loop)
         self._stream_reader = StreamReader(loop=self._loop)
+        self._stream_writer = None
         self._reader = None
 
         self._topic_to_clients = {}
@@ -102,11 +104,14 @@ class MQTTClientProtocol(asyncio.Protocol):
 
         self._stream_reader.set_transport(transport)
         self._reader = StreamReaderAdapter(self._stream_reader)
+        self._stream_writer = StreamWriter(transport, self,
+                                           self._stream_reader,
+                                           self._loop)
         self._loop.create_task(self.start())
 
     def connection_lost(self, exc):
         logging.info("Lost connection with mqtt server{0}".format(self._peername))
-
+        super().connection_lost(exc)
         self._topic_to_clients = {}
 
         if self._stream_reader is not None:
@@ -144,7 +149,7 @@ class MQTTClientProtocol(asyncio.Protocol):
         password = self._encryptor.encrypt(self._encryptor.password.encode('utf-8'))
         connect_payload = ConnectPayload(client_id=ConnectPayload.gen_client_id(), password=password)
         connect_packet = ConnectPacket(vh=connect_vh, payload=connect_payload)
-        self._send_packet(connect_packet)
+        yield from self._send_packet(connect_packet)
 
         logging.info("Creating connection to mqtt server.")
 
@@ -235,23 +240,25 @@ class MQTTClientProtocol(asyncio.Protocol):
 
     def write(self, data: bytes, topic):
         if not self._connected:
-            self._write_pending_data_topic((data, topic))
+            self._write_pending_data_topic.append((data, topic))
         else:
             data = self._encryptor.encrypt(data)
             packet = PublishPacket.build(topic, data, None, dup_flag=0, qos=0, retain=0)
-            self._send_packet(packet)
+            ensure_future(self._send_packet(packet), loop=self._loop)
 
     def write_eof(self, topic):
         packet = PublishPacket.build(topic, b'', None, dup_flag=0, qos=0, retain=1)
-        self._send_packet(packet)
+        ensure_future(self._send_packet(packet), loop=self._loop)
 
+    @asyncio.coroutine
     def _send_packet(self, packet):
-        self._transport.write(packet.to_bytes())
+        yield from packet.to_stream(self._stream_writer)
         self._keepalive_task.cancel()
         self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
 
     def handle_write_timeout(self):
         packet = PingReqPacket()
+        # TODO: check transport
         self._transport.write(packet.to_bytes())
         self._keepalive_task.cancel()
         self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
@@ -266,12 +273,12 @@ class MQTTClientProtocol(asyncio.Protocol):
             logging.info("Connection to mqtt server established!")
 
             if len(self._write_pending_data_topic) > 0:
+                self._keepalive_task.cancel()
                 for data, topic in self._write_pending_data_topic:
                     data = self._encryptor.encrypt(data)
                     packet = PublishPacket.build(topic, data, None, dup_flag=0, qos=0, retain=0)
-                    self._transport.write(packet.to_bytes())
+                    yield from self._send_packet(packet)
                 self._write_pending_data_topic = []
-                self._keepalive_task.cancel()
                 self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
         else:
             logging.info("Unable to create connection to mqtt server! Shuting down...")
