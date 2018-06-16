@@ -1,7 +1,7 @@
 import collections
 import asyncio
 from asyncio import StreamReader, StreamWriter
-from asyncio import ensure_future
+from asyncio import ensure_future, Queue
 import logging
 
 from fullyconnect import cryptor, common
@@ -63,6 +63,8 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         self._reader = None
         self._approved = False
 
+        self._queue = Queue(loop=loop)
+
     def connection_made(self, transport):
         self._peername = transport.get_extra_info('peername')
         self._transport = transport
@@ -78,6 +80,7 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
 
     def connection_lost(self, exc):
         logging.info("Mqtt client connection{} lost.".format(self._peername))
+        super().connection_lost(exc)
 
         if self._stream_reader is not None:
             if exc is None:
@@ -94,12 +97,25 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         self._stream_reader.feed_eof()
 
     @asyncio.coroutine
+    def consume(self):
+        while self._transport is not None:
+            packet = yield from self._queue.get()
+            if packet is None:
+                break
+
+            if self._transport is None:
+                break
+            yield from self._send_packet(packet)
+
+    @asyncio.coroutine
     def start(self):
         self._reader_ready = asyncio.Event(loop=self._loop)
         self._reader_task = asyncio.Task(self._reader_loop(), loop=self._loop)
         yield from self._reader_ready.wait()
         if self._keepalive_timeout:
             self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
+
+        self._loop.create_task(self.consume())
 
     @asyncio.coroutine
     def stop(self):
@@ -192,12 +208,17 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
     def write(self, data, client_topic):
         data = self._encryptor.encrypt(data)
         packet = PublishPacket.build(client_topic, data, None, dup_flag=0, qos=0, retain=0)
-        ensure_future(self._send_packet(packet), loop=self._loop)
+        ensure_future(self._do_write(packet), loop=self._loop)
 
     def _write_eof(self, client_topic):
         packet = PublishPacket.build(client_topic, b'', None, dup_flag=0, qos=0, retain=1)
-        ensure_future(self._send_packet(packet), loop=self._loop)
-        
+        ensure_future(self._do_write(packet), loop=self._loop)
+
+    @asyncio.coroutine
+    def _do_write(self, packet):
+        yield from self._queue.put(packet)
+
+    @asyncio.coroutine
     def _send_packet(self, packet):
         yield from packet.to_stream(self._stream_writer)
         self._keepalive_task.cancel()
@@ -226,7 +247,7 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
 
         connack_vh = ConnackVariableHeader(return_code=return_code)
         connack = ConnackPacket(variable_header=connack_vh)
-        yield from self._send_packet(connack)
+        yield from self._do_write(connack)
 
         if return_code != 0:
             self._loop.create_task(self.stop())
@@ -278,7 +299,7 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
     def handle_pingreq(self, pingreq: PingReqPacket):
         logging.info("Received PingRepPacket from mqtt client, replying PingRespPacket.")
         ping_resp = PingRespPacket()
-        yield from self._send_packet(ping_resp)
+        yield from self._do_write(ping_resp)
 
     async def create_connection(self, remote, host, port):
         try:
