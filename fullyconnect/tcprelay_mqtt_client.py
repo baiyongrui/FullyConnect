@@ -1,7 +1,7 @@
 import collections
 import asyncio
 from asyncio import StreamReader, StreamWriter
-from asyncio import ensure_future
+from asyncio import ensure_future, Queue
 import logging
 
 from fullyconnect import cryptor, common
@@ -88,6 +88,8 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
 
         self._topic_to_clients = {}
 
+        self._queue = Queue(loop=loop)
+
     async def create_connection(self):
         try:
             # TODO handle pending task
@@ -136,6 +138,17 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
         self._stream_reader.feed_eof()
 
     @asyncio.coroutine
+    def consume(self):
+        while self._transport is not None:
+            packet = yield from self._queue.get()
+            if packet is None:
+                break
+
+            if self._transport is None:
+                break
+            yield from self._send_packet(packet)
+
+    @asyncio.coroutine
     def start(self):
         self._reader_ready = asyncio.Event(loop=self._loop)
         self._reader_task = asyncio.Task(self._reader_loop(), loop=self._loop)
@@ -143,13 +156,15 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
         if self._keepalive_timeout:
             self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
 
+        self._loop.create_task(self.consume())
+
         # send connect packet
         connect_vh = ConnectVariableHeader(keep_alive=self._keepalive_timeout)
         connect_vh.password_flag = True
         password = self._encryptor.encrypt(self._encryptor.password.encode('utf-8'))
         connect_payload = ConnectPayload(client_id=ConnectPayload.gen_client_id(), password=password)
         connect_packet = ConnectPacket(vh=connect_vh, payload=connect_payload)
-        yield from self._send_packet(connect_packet)
+        yield from self._do_write(connect_packet)
 
         logging.info("Creating connection to mqtt server.")
 
@@ -244,11 +259,15 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
         else:
             data = self._encryptor.encrypt(data)
             packet = PublishPacket.build(topic, data, None, dup_flag=0, qos=0, retain=0)
-            ensure_future(self._send_packet(packet), loop=self._loop)
+            ensure_future(self._do_write(packet), loop=self._loop)
 
     def write_eof(self, topic):
         packet = PublishPacket.build(topic, b'', None, dup_flag=0, qos=0, retain=1)
-        ensure_future(self._send_packet(packet), loop=self._loop)
+        ensure_future(self._do_write(packet), loop=self._loop)
+
+    @asyncio.coroutine
+    def _do_write(self, packet):
+        yield from self._queue.put(packet)
 
     @asyncio.coroutine
     def _send_packet(self, packet):
@@ -277,7 +296,7 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
                 for data, topic in self._write_pending_data_topic:
                     data = self._encryptor.encrypt(data)
                     packet = PublishPacket.build(topic, data, None, dup_flag=0, qos=0, retain=0)
-                    yield from self._send_packet(packet)
+                    yield from self._do_write(packet)
                 self._write_pending_data_topic = []
                 self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
         else:
@@ -309,7 +328,7 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
     def handle_pingreq(self, pingreq: PingReqPacket):
         logging.info("Received PingReqPacket from mqtt server, Replying PingResqPacket.")
         ping_resp = PingRespPacket()
-        self._send_packet(ping_resp)
+        yield from self._do_write(ping_resp)
 
     def register_client_topic(self, topic, server):
         self._topic_to_clients[topic] = server

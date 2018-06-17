@@ -49,10 +49,21 @@ def read_or_raise(reader, n=-1):
     :param n: number of bytes to read
     :return: bytes read
     """
-    data = yield from reader.read(n)
-    if not data:
-        raise NoDataException("No more data")
-    return data
+
+    buffer = bytearray()
+    next_n = n
+    while True:
+        data = yield from reader.read(next_n)
+        if not data:
+            raise NoDataException("No more data")
+        buffer.extend(data)
+
+        if len(buffer) == n or n == -1:
+            break
+        else:
+            next_n = n - len(buffer)
+
+    return bytes(buffer)
 
 
 @asyncio.coroutine
