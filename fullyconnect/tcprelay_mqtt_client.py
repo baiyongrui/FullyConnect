@@ -271,7 +271,11 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
 
     @asyncio.coroutine
     def _send_packet(self, packet):
-        yield from packet.to_stream(self._stream_writer)
+        try:
+            yield from packet.to_stream(self._stream_writer)
+        except ConnectionResetError:
+            return
+
         self._keepalive_task.cancel()
         self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
 
