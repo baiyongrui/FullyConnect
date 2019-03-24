@@ -78,6 +78,7 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
         self._peername = None
 
         self._reader_task = None
+        self._data_task = None
         self._keepalive_task = None
         self._keepalive_timeout = self._config['timeout']
         self._reader_ready = None
@@ -156,7 +157,7 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
         if self._keepalive_timeout:
             self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
 
-        self._loop.create_task(self.consume())
+        self._data_task = self._loop.create_task(self.consume())
 
         # send connect packet
         connect_vh = ConnectVariableHeader(keep_alive=self._keepalive_timeout)
@@ -173,6 +174,7 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
         self._connected = False
         if self._keepalive_task:
             self._keepalive_task.cancel()
+        self._data_task.cancel()
         logger.debug("waiting for tasks to be stopped")
         if not self._reader_task.done():
 
@@ -310,9 +312,9 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
     # @asyncio.coroutine
     def handle_publish(self, publish_packet: PublishPacket):
         data = bytes(publish_packet.data)
-        try:
-            server = self._topic_to_clients[publish_packet.topic_name]
-        except KeyError:
+
+        server = self._topic_to_clients.get(publish_packet.topic_name, None)
+        if server is None:
             logging.info("Received unregistered publish topic({0}) from mqtt server, packet will be ignored.".format(
                 publish_packet.topic_name))
             server = None
@@ -415,7 +417,7 @@ class RelayServerProtocol(asyncio.Protocol):
     def timeout_handler(self):
         after = self._last_activity - self._loop.time() + self._timeout
         if after < 0:
-            logging.warning("Client({0}) connection{1} timeout.".format(self._topic, self._peername))
+            logging.info("Client({0}) connection{1} timeout.".format(self._topic, self._peername))
             self.close()
         else:
             self._timeout_handle = self._loop.call_later(after, self.timeout_handler)

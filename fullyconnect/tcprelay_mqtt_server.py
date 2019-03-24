@@ -54,6 +54,7 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         self._peername = None
 
         self._reader_task = None
+        self._data_task = None
         self._keepalive_task = None
         self._keepalive_timeout = config['timeout']
         self._reader_ready = None
@@ -115,15 +116,15 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         if self._keepalive_timeout:
             self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
 
-        self._loop.create_task(self.consume())
+        self._data_task = self._loop.create_task(self.consume())
 
     @asyncio.coroutine
     def stop(self):
         if self._keepalive_task:
             self._keepalive_task.cancel()
+        self._data_task.cancel()
         logger.debug("waiting for tasks to be stopped")
         if not self._reader_task.done():
-
             if not self._reader_stopped.is_set():
                 self._reader_task.cancel()  # this will cause the reader_loop handle CancelledError
                 # yield from asyncio.wait(
@@ -378,7 +379,7 @@ class RelayRemoteProtocol(asyncio.Protocol):
     def timeout_handler(self):
         after = self._last_activity - self._loop.time() + self._timeout
         if after < 0:
-            logging.warning("Remote connection{} timeout".format(self._peername))
+            logging.info("Remote connection{} timeout".format(self._peername))
             self.close()
         else:
             self._timeout_handle = self._loop.call_later(after, self.timeout_handler)
