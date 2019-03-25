@@ -5,6 +5,7 @@ from fullyconnect import cryptor, common
 from fullyconnect.mqtt import packet_class
 from fullyconnect.errors import fullyconnectException, MQTTException, NoDataException
 from fullyconnect.mqtt_sn.publish import PublishPacket
+from fullyconnect.udpsession_lru import UDPSessionLRU
 
 logging.basicConfig(level=logging.DEBUG,
                         format='%(asctime)s %(levelname)-8s %(message)s',
@@ -17,9 +18,6 @@ def topic_generator():
     while True:
         yield seq
         seq += 1
-
-
-f_topic_generator = topic_generator()
 
 
 class UDPRelayServer:
@@ -59,8 +57,7 @@ class MQTTClientProtocol(asyncio.DatagramProtocol):
         self._password = common.to_bytes(config['password'])
         self._method = config['method']
 
-        self._topic_to_addr = {}
-        self._addr_to_topic = {}
+        self._udpsession_lru = UDPSessionLRU(128, topic_generator())
 
         self._server = None
 
@@ -76,22 +73,21 @@ class MQTTClientProtocol(asyncio.DatagramProtocol):
     def datagram_received(self, data, addr):
         packet = PublishPacket.decode(data)
         if packet is not None:
-            if not packet.retain_flag:  # retain=1 indicate we should close the client connection
-                try:
-                    data, key, iv = cryptor.decrypt_all(self._password,
-                                                        self._method,
-                                                        packet.data)
-                except Exception:
-                    logger.debug('UDP handle_server: decrypt data failed')
-                    return
-                header_result = common.parse_header(data)
-                if header_result is None:
-                    logger.error("can not parse header when handling publish packet  from server: {}".format(addr))
-                    return
-                addr = self._topic_to_addr.get(packet.topic_id, None)
-                if addr is not None and self._server is not None:
-                    self._server.write(data, addr)
-                    self._last_activity = self._loop.time()
+            try:
+                data, key, iv = cryptor.decrypt_all(self._password,
+                                                    self._method,
+                                                    packet.data)
+            except Exception:
+                logger.debug('UDP handle_server: decrypt data failed')
+                return
+            header_result = common.parse_header(data)
+            if header_result is None:
+                logger.error("can not parse header when handling publish packet  from server: {}".format(addr))
+                return
+            addr = self._udpsession_lru.topic_to_addr(packet.topic_id)
+            if addr is not None and self._server is not None:
+                self._server.write(data, addr)
+                self._last_activity = self._loop.time()
 
     async def create_endpoint(self, host, port):
         try:
@@ -109,11 +105,7 @@ class MQTTClientProtocol(asyncio.DatagramProtocol):
         self._server = None
 
     def write(self, data: bytes, addr):
-        topic = self._addr_to_topic.get(addr, None)
-        if topic is None:
-            topic = next(f_topic_generator)
-            self._addr_to_topic[addr] = topic
-            self._topic_to_addr[topic] = addr
+        topic = self._udpsession_lru.addr_to_topic(addr)
         data = cryptor.encrypt_all(self._password, self._method, data)
         packet = PublishPacket(topic, topic, data, 0)
 
@@ -142,8 +134,7 @@ class MQTTClientProtocol(asyncio.DatagramProtocol):
         # after = self._last_activity - self._loop.time() + self._timeout
         if self._loop.time() - self._last_activity >= self._timeout:
             logging.info("clear all expired udp sessions.")
-            self._topic_to_addr.clear()
-            self._addr_to_topic.clear()
+            self._udpsession_lru.clear()
         self._timeout_handler = self._loop.call_later(self._timeout, self.timeout_handler)
 
     def regsiter_server(self, server):

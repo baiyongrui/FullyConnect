@@ -106,6 +106,9 @@ class PublishPacket(object):
         length, msg_type, flags, topic_id, msg_id = unpack("!HBBHH", buf[1:9])
         data = buf[9:]
 
+        if msg_type != PUBLISH or length < 9:
+            return None
+
         return cls(topic_id, msg_id, data, flags)
 
 

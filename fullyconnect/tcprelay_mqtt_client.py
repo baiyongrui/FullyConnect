@@ -384,11 +384,19 @@ class RelayServerProtocol(asyncio.Protocol):
     def data_received(self, data):
         # self._last_activity = self._loop.time()
 
+        # verify packet
         data = self._encryptor.decrypt(data)
-        if self._stage == STAGE_STREAM:
-            self._mqtt_client.write(data, self._topic)
-        elif self._stage == STAGE_ADDR:     # Check
-            self.handle_stage_addr(data)
+        if self._stage == STAGE_ADDR:
+            header_result = common.parse_header(data)
+            if header_result is None:
+                logging.error("Can not parse header when handling client connection{0}".format(self._peername))
+                self.close()
+                return
+
+            addrtype, remote_addr, remote_port, header_length = header_result
+            self._stage = STAGE_STREAM
+
+        self._mqtt_client.write(data, self._topic)
 
     # handle remote read
     def write(self, data):
@@ -396,18 +404,6 @@ class RelayServerProtocol(asyncio.Protocol):
         self._transport.write(data)
 
         self._last_activity = self._loop.time()
-
-    def handle_stage_addr(self, data):
-        header_result = common.parse_header(data)
-        if header_result is None:
-            logging.error("Can not parse header when handling client connection{0}".format(self._peername))
-            self.close()
-            return
-
-        addrtype, remote_addr, remote_port, header_length = header_result
-
-        self._stage = STAGE_STREAM
-        self._mqtt_client.write(data, self._topic)
 
     def close(self):
         self._manual_close = True
@@ -425,7 +421,7 @@ class RelayServerProtocol(asyncio.Protocol):
 
 if __name__ == "__main__":
 
-    config = {"mqtt_client": {"password": "", "method": "aes-128-cfb", "timeout": 60, "address":"127.0.0.1", "port": 1883},
+    config = {"mqtt_client": {"password": "", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883},
               "server": {"password": "", "method": "rc4-md5", "timeout": 60, "port": 1370}}
 
     server = TCPRelayServer(config)
