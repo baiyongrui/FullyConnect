@@ -7,7 +7,7 @@ import logging
 from fullyconnect import cryptor, common
 from fullyconnect.adapters import StreamReaderAdapter, FlowControlMixin
 from fullyconnect.mqtt import packet_class
-from fullyconnect.errors import fullyconnectException, MQTTException, NoDataException
+from fullyconnect.errors import MQTTException, NoDataException
 from fullyconnect.mqtt.packet import (
     RESERVED_0, CONNACK, PUBLISH,
     SUBSCRIBE, SUBACK, UNSUBSCRIBE, UNSUBACK, PINGREQ, PINGRESP, DISCONNECT,
@@ -17,6 +17,7 @@ from fullyconnect.mqtt.pingreq import PingReqPacket
 from fullyconnect.mqtt.connect import ConnectPacket, ConnectPayload, ConnectVariableHeader
 from fullyconnect.mqtt.connack import ConnackPacket, ConnackVariableHeader
 from fullyconnect.mqtt.pingresp import PingRespPacket
+from fullyconnect.MQTTClientGroups import MQTTClientGroups
 
 logging.basicConfig(level=logging.DEBUG,
                         format='%(asctime)s %(levelname)-8s %(message)s',
@@ -49,10 +50,13 @@ class TCPRelayServer:
     def add_to_loop(self, loop):
         self._loop = loop
 
-        self._mqtt_client = MQTTClientProtocol(loop, self._config['mqtt_client'])
-        self._loop.create_task(self._mqtt_client.create_connection())
+        self._mqtt_client_groups = MQTTClientGroups()
+        for client_config in self._config['mqtt_client']:
+            mqtt_client = MQTTClientProtocol(loop, client_config)
+            self._mqtt_client_groups.add_client(mqtt_client)
+            self._loop.create_task(mqtt_client.create_connection())
 
-        coro = loop.create_server(lambda: RelayServerProtocol(self._loop, self._config['server'], self._mqtt_client),
+        coro = loop.create_server(lambda: RelayServerProtocol(self._loop, self._config['server'], self._mqtt_client_groups),
                                   '0.0.0.0', self._config['server']['port'])
         self._server = loop.run_until_complete(coro)
 
@@ -345,12 +349,12 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
 
 class RelayServerProtocol(asyncio.Protocol):
 
-    def __init__(self, loop, config, mqtt_client: MQTTClientProtocol):
+    def __init__(self, loop, config, mqtt_client_groups: MQTTClientGroups):
         self._loop = loop
         self._transport = None
 
         self._stage = STAGE_ADDR
-        self._mqtt_client = mqtt_client
+        self._mqtt_client = mqtt_client_groups.pick_client()
 
         self._peername = None
         self._last_activity = 0
@@ -421,8 +425,11 @@ class RelayServerProtocol(asyncio.Protocol):
 
 if __name__ == "__main__":
 
-    config = {"mqtt_client": {"password": "", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883},
-              "server": {"password": "", "method": "rc4-md5", "timeout": 60, "port": 1370}}
+    config = {
+        "mqtt_client": [
+            {"password": "", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883},
+            {"password": "", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883}],
+        "server": {"password": "", "method": "rc4-md5", "timeout": 60, "port": 1370}}
 
     server = TCPRelayServer(config)
     import uvloop
