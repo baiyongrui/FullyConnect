@@ -2,7 +2,7 @@
 #
 # See the file license.txt for copying permission.
 from fullyconnect.mqtt.packet import MQTTPacket, MQTTFixedHeader, PUBCOMP, PacketIdVariableHeader
-from fullyconnect.errors import fullyconnectException
+from fullyconnect.errors import FullyConnectException
 
 
 class PubcompPacket(MQTTPacket):
@@ -22,7 +22,7 @@ class PubcompPacket(MQTTPacket):
             header = MQTTFixedHeader(PUBCOMP, 0x00)
         else:
             if fixed.packet_type is not PUBCOMP:
-                raise fullyconnectException("Invalid fixed packet type %s for PubcompPacket init" % fixed.packet_type)
+                raise FullyConnectException("Invalid fixed packet type %s for PubcompPacket init" % fixed.packet_type)
             header = fixed
         super().__init__(header)
         self.variable_header = variable_header

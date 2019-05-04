@@ -4,7 +4,7 @@
 import asyncio
 from fullyconnect.mqtt.packet import CONNACK, MQTTPacket, MQTTFixedHeader, MQTTVariableHeader
 from fullyconnect.mqtt_codecs import read_or_raise, bytes_to_int
-from fullyconnect.errors import fullyconnectException
+from fullyconnect.errors import FullyConnectException
 from fullyconnect.adapters import ReaderAdapter
 
 CONNECTION_ACCEPTED = 0x00
@@ -71,7 +71,7 @@ class ConnackPacket(MQTTPacket):
             header = MQTTFixedHeader(CONNACK, 0x00)
         else:
             if fixed.packet_type is not CONNACK:
-                raise fullyconnectException("Invalid fixed packet type %s for ConnackPacket init" % fixed.packet_type)
+                raise FullyConnectException("Invalid fixed packet type %s for ConnackPacket init" % fixed.packet_type)
             header = fixed
         super().__init__(header)
         self.variable_header = variable_header

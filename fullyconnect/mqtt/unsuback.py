@@ -2,7 +2,7 @@
 #
 # See the file license.txt for copying permission.
 from fullyconnect.mqtt.packet import MQTTPacket, MQTTFixedHeader, UNSUBACK, PacketIdVariableHeader
-from fullyconnect.errors import fullyconnectException
+from fullyconnect.errors import FullyConnectException
 
 
 class UnsubackPacket(MQTTPacket):
@@ -14,7 +14,7 @@ class UnsubackPacket(MQTTPacket):
             header = MQTTFixedHeader(UNSUBACK, 0x00)
         else:
             if fixed.packet_type is not UNSUBACK:
-                raise fullyconnectException("Invalid fixed packet type %s for UnsubackPacket init" % fixed.packet_type)
+                raise FullyConnectException("Invalid fixed packet type %s for UnsubackPacket init" % fixed.packet_type)
             header = fixed
 
         super().__init__(header)

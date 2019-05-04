@@ -17,7 +17,10 @@ from fullyconnect.mqtt.pingreq import PingReqPacket
 from fullyconnect.mqtt.connect import ConnectPacket, ConnectPayload, ConnectVariableHeader
 from fullyconnect.mqtt.connack import ConnackPacket, ConnackVariableHeader
 from fullyconnect.mqtt.pingresp import PingRespPacket
-from fullyconnect.MQTTClientGroups import MQTTClientGroups
+from fullyconnect.ConnectionGroup import ConnectionGroup
+from fullyconnect.DataChunk import DataChunk
+
+import traceback
 
 logging.basicConfig(level=logging.DEBUG,
                         format='%(asctime)s %(levelname)-8s %(message)s',
@@ -36,6 +39,7 @@ def topic_generator():
 
 
 f_topic_generator = topic_generator()
+topic_to_clients = {}
 
 
 class TCPRelayServer:
@@ -45,18 +49,19 @@ class TCPRelayServer:
         self._server = None
         self._config = config
 
+        # TODO remove
         self._mqtt_client = None
+        self._mqtt_client_connections = ConnectionGroup()
 
     def add_to_loop(self, loop):
         self._loop = loop
 
-        self._mqtt_client_groups = MQTTClientGroups()
         for client_config in self._config['mqtt_client']:
             mqtt_client = MQTTClientProtocol(loop, client_config)
-            self._mqtt_client_groups.add_client(mqtt_client)
+            self._mqtt_client_connections.add_connection(mqtt_client)
             self._loop.create_task(mqtt_client.create_connection())
 
-        coro = loop.create_server(lambda: RelayServerProtocol(self._loop, self._config['server'], self._mqtt_client_groups),
+        coro = loop.create_server(lambda: RelayServerProtocol(self._loop, self._config['server'], self._mqtt_client_connections),
                                   '0.0.0.0', self._config['server']['port'])
         self._server = loop.run_until_complete(coro)
 
@@ -91,8 +96,6 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
         self._stream_writer = None
         self._reader = None
 
-        self._topic_to_clients = {}
-
         self._queue = Queue(loop=loop)
 
     async def create_connection(self):
@@ -119,7 +122,6 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
     def connection_lost(self, exc):
         logging.info("Lost connection with mqtt server{0}".format(self._peername))
         super().connection_lost(exc)
-        self._topic_to_clients = {}
 
         if self._stream_reader is not None:
             if exc is None:
@@ -252,6 +254,7 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
             except BaseException as e:
                 logging.warning(
                     "{}:{} Unhandled exception in reader coro: {}".format(type(self).__name__, self._peername, e))
+                print(traceback.format_exc())
                 break
         while running_tasks:
             running_tasks.popleft().cancel()
@@ -316,16 +319,20 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
     # @asyncio.coroutine
     def handle_publish(self, publish_packet: PublishPacket):
         data = bytes(publish_packet.data)
-
-        server = self._topic_to_clients.get(publish_packet.topic_name, None)
+        # if publish_packet.qos == 0:
+        #     # packet for decipher iv
+        #     self._encryptor.decrypt(data)
+        #     return
+        server = topic_to_clients.get(publish_packet.topic_name, None)
         if server is None:
             logging.info("Received unregistered publish topic({0}) from mqtt server, packet will be ignored.".format(
                 publish_packet.topic_name))
-            server = None
+            # return
         if not publish_packet.retain_flag:    # retain=1 indicate we should close the client connection
-            data = self._encryptor.decrypt(data)
+            # data = self._encryptor.decrypt(data)
             if server is not None:
-                server.write(data)
+                chunk = DataChunk(publish_packet.packet_id, data)
+                server.deliver(chunk)
         else:
             if server is not None:
                 server.close()
@@ -340,21 +347,15 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
         ping_resp = PingRespPacket()
         yield from self._do_write(ping_resp)
 
-    def register_client_topic(self, topic, server):
-        self._topic_to_clients[topic] = server
-
-    def unregister_client_topic(self, topic):
-        self._topic_to_clients.pop(topic, None)
-
 
 class RelayServerProtocol(asyncio.Protocol):
 
-    def __init__(self, loop, config, mqtt_client_groups: MQTTClientGroups):
+    def __init__(self, loop, config, mqtt_client_groups: ConnectionGroup):
         self._loop = loop
         self._transport = None
 
         self._stage = STAGE_ADDR
-        self._mqtt_client = mqtt_client_groups.pick_client()
+        self._mqtt_client = mqtt_client_groups.pick_connection()
 
         self._peername = None
         self._last_activity = 0
@@ -364,9 +365,12 @@ class RelayServerProtocol(asyncio.Protocol):
         self._manual_close = False
 
         self._topic = next(f_topic_generator)
-        self._mqtt_client.register_client_topic(self._topic, self)
+        topic_to_clients[self._topic] = self
 
         self._encryptor = cryptor.Cryptor(config['password'], config['method'])
+
+        self._cur_chunk_index = 0
+        self._chunks = [None for i in range(1000)]
 
     def connection_made(self, transport):
         self._peername = transport.get_extra_info('peername')
@@ -381,7 +385,7 @@ class RelayServerProtocol(asyncio.Protocol):
         if not self._manual_close:
             self._mqtt_client.write_eof(self._topic)
         self._transport = None
-        self._mqtt_client.unregister_client_topic(self._topic)
+        topic_to_clients.pop(self._topic, None)
         self._timeout_handle.cancel()
         self._timeout_handle = None
 
@@ -409,6 +413,33 @@ class RelayServerProtocol(asyncio.Protocol):
 
         self._last_activity = self._loop.time()
 
+    def deliver(self, chunk: DataChunk):
+        index = chunk.chunk_index % len(self._chunks)
+        # if self._chunks[index] is not None:
+        #     self.close()
+        self._chunks[index] = chunk
+
+        self.try_write()
+
+    def try_write(self):
+        buf = bytearray()
+        while True:
+            chunk = self._chunks[self._cur_chunk_index]
+            if chunk is not None:
+                buf.extend(chunk.data)
+                self._chunks[self._cur_chunk_index] = None
+                self._cur_chunk_index += 1
+                if self._cur_chunk_index >= len(self._chunks):
+                    self._cur_chunk_index = 0
+            else:
+                break
+
+        if len(buf) > 0:
+            data = self._encryptor.encrypt(bytes(buf))
+            self._transport.write(data)
+
+            self._last_activity = self._loop.time()
+
     def close(self):
         self._manual_close = True
         if self._transport is not None:
@@ -427,13 +458,18 @@ if __name__ == "__main__":
 
     config = {
         "mqtt_client": [
-            {"password": "", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883},
-            {"password": "", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883}],
-        "server": {"password": "", "method": "rc4-md5", "timeout": 60, "port": 1370}}
+            {"password": "44541992by", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883}
+            ,
+            {"password": "44541992by", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883}
+            ,
+            {"password": "44541992by", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883}
+            ],
+        "server": {"password": "44541992by", "method": "rc4-md5", "timeout": 60, "port": 1370}}
 
     server = TCPRelayServer(config)
-    import uvloop
-    loop = uvloop.new_event_loop()
-    asyncio.set_event_loop(loop)
+    # import uvloop
+    # loop = uvloop.new_event_loop()
+    # asyncio.set_event_loop(loop)
+    loop = asyncio.get_event_loop()
     server.add_to_loop(loop)
     loop.run_forever()

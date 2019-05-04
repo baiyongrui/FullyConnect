@@ -4,7 +4,7 @@
 import asyncio
 
 from fullyconnect.mqtt.packet import MQTTPacket, MQTTFixedHeader, PUBLISH, MQTTVariableHeader, MQTTPayload
-from fullyconnect.errors import fullyconnectException, MQTTException
+from fullyconnect.errors import FullyConnectException, MQTTException
 from fullyconnect.mqtt_codecs import decode_packet_id, decode_string, encode_string, int_to_bytes
 
 
@@ -76,7 +76,7 @@ class PublishPacket(MQTTPacket):
             header = MQTTFixedHeader(PUBLISH, 0x00)
         else:
             if fixed.packet_type is not PUBLISH:
-                raise fullyconnectException("Invalid fixed packet type %s for PublishPacket init" % fixed.packet_type)
+                raise FullyConnectException("Invalid fixed packet type %s for PublishPacket init" % fixed.packet_type)
             header = fixed
 
         super().__init__(header)

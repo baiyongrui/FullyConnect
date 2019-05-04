@@ -4,7 +4,7 @@
 import asyncio
 
 from fullyconnect.mqtt.packet import MQTTPacket, MQTTFixedHeader, SUBACK, PacketIdVariableHeader, MQTTPayload, MQTTVariableHeader
-from fullyconnect.errors import fullyconnectException, NoDataException
+from fullyconnect.errors import FullyConnectException, NoDataException
 from fullyconnect.adapters import ReaderAdapter
 from fullyconnect.mqtt_codecs import bytes_to_int, int_to_bytes, read_or_raise
 
@@ -53,7 +53,7 @@ class SubackPacket(MQTTPacket):
             header = MQTTFixedHeader(SUBACK, 0x00)
         else:
             if fixed.packet_type is not SUBACK:
-                raise fullyconnectException("Invalid fixed packet type %s for SubackPacket init" % fixed.packet_type)
+                raise FullyConnectException("Invalid fixed packet type %s for SubackPacket init" % fixed.packet_type)
             header = fixed
 
         super().__init__(header)

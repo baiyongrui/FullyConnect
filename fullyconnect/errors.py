@@ -3,7 +3,7 @@
 # See the file license.txt for copying permission.
 
 
-class fullyconnectException(Exception):
+class FullyConnectException(Exception):
     """
     fullyconnect base exception
     """

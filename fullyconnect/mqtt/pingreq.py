@@ -2,7 +2,7 @@
 #
 # See the file license.txt for copying permission.
 from fullyconnect.mqtt.packet import MQTTPacket, MQTTFixedHeader, PINGREQ
-from fullyconnect.errors import fullyconnectException
+from fullyconnect.errors import FullyConnectException
 
 
 class PingReqPacket(MQTTPacket):
@@ -14,7 +14,7 @@ class PingReqPacket(MQTTPacket):
             header = MQTTFixedHeader(PINGREQ, 0x00)
         else:
             if fixed.packet_type is not PINGREQ:
-                raise fullyconnectException("Invalid fixed packet type %s for PingReqPacket init" % fixed.packet_type)
+                raise FullyConnectException("Invalid fixed packet type %s for PingReqPacket init" % fixed.packet_type)
             header = fixed
         super().__init__(header)
         self.variable_header = None

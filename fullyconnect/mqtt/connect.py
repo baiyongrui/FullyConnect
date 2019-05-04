@@ -6,7 +6,7 @@ import asyncio
 from fullyconnect.mqtt_codecs import bytes_to_int, decode_data_with_length, decode_string, decode_bytes_string,\
     encode_data_with_length, encode_string, encode_byte_string, int_to_bytes, read_or_raise
 from fullyconnect.mqtt.packet import MQTTPacket, MQTTFixedHeader, CONNECT, MQTTVariableHeader, MQTTPayload
-from fullyconnect.errors import fullyconnectException, NoDataException
+from fullyconnect.errors import FullyConnectException, NoDataException
 from fullyconnect.adapters import ReaderAdapter
 
 
@@ -338,7 +338,7 @@ class ConnectPacket(MQTTPacket):
             header = MQTTFixedHeader(CONNECT, 0x00)
         else:
             if fixed.packet_type is not CONNECT:
-                raise fullyconnectException("Invalid fixed packet type %s for ConnectPacket init" % fixed.packet_type)
+                raise FullyConnectException("Invalid fixed packet type %s for ConnectPacket init" % fixed.packet_type)
             header = fixed
         super().__init__(header)
         self.variable_header = vh

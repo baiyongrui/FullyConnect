@@ -2,7 +2,7 @@
 #
 # See the file license.txt for copying permission.
 from fullyconnect.mqtt.packet import MQTTPacket, MQTTFixedHeader, DISCONNECT
-from fullyconnect.errors import fullyconnectException
+from fullyconnect.errors import FullyConnectException
 
 
 class DisconnectPacket(MQTTPacket):
@@ -14,7 +14,7 @@ class DisconnectPacket(MQTTPacket):
             header = MQTTFixedHeader(DISCONNECT, 0x00)
         else:
             if fixed.packet_type is not DISCONNECT:
-                raise fullyconnectException("Invalid fixed packet type %s for DisconnectPacket init" % fixed.packet_type)
+                raise FullyConnectException("Invalid fixed packet type %s for DisconnectPacket init" % fixed.packet_type)
             header = fixed
         super().__init__(header)
         self.variable_header = None

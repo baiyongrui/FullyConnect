@@ -4,7 +4,7 @@
 import asyncio
 
 from fullyconnect.mqtt.packet import MQTTPacket, MQTTFixedHeader, UNSUBSCRIBE, PacketIdVariableHeader, MQTTPayload, MQTTVariableHeader
-from fullyconnect.errors import fullyconnectException, NoDataException
+from fullyconnect.errors import FullyConnectException, NoDataException
 from fullyconnect.mqtt_codecs import decode_string, encode_string
 
 
@@ -45,7 +45,7 @@ class UnsubscribePacket(MQTTPacket):
             header = MQTTFixedHeader(UNSUBSCRIBE, 0x02)  # [MQTT-3.10.1-1]
         else:
             if fixed.packet_type is not UNSUBSCRIBE:
-                raise fullyconnectException("Invalid fixed packet type %s for UnsubscribePacket init" % fixed.packet_type)
+                raise FullyConnectException("Invalid fixed packet type %s for UnsubscribePacket init" % fixed.packet_type)
             header = fixed
 
         super().__init__(header)

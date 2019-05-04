@@ -3,7 +3,7 @@ import logging
 
 from fullyconnect import cryptor, common
 from fullyconnect.mqtt import packet_class
-from fullyconnect.errors import fullyconnectException, MQTTException, NoDataException
+from fullyconnect.errors import FullyConnectException, MQTTException, NoDataException
 from fullyconnect.mqtt_sn.publish import PublishPacket
 from fullyconnect.udpsession_lru import UDPSessionLRU
 

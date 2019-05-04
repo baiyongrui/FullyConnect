@@ -1,7 +1,7 @@
 # Copyright (c) 2015 Nicolas JOUANIN
 #
 # See the file license.txt for copying permission.
-from fullyconnect.errors import fullyconnectException
+from fullyconnect.errors import FullyConnectException
 from fullyconnect.mqtt.packet import (
     CONNECT, CONNACK, PUBLISH, PUBACK, PUBREC, PUBREL, PUBCOMP, SUBSCRIBE,
     SUBACK, UNSUBSCRIBE, UNSUBACK, PINGREQ, PINGRESP, DISCONNECT,
@@ -44,4 +44,4 @@ def packet_class(fixed_header: MQTTFixedHeader):
         cls = packet_dict[fixed_header.packet_type]
         return cls
     except KeyError:
-        raise fullyconnectException("Unexpected packet Type '%s'" % fixed_header.packet_type)
+        raise FullyConnectException("Unexpected packet Type '%s'" % fixed_header.packet_type)

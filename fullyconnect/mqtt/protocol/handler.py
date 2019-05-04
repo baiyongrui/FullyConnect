@@ -31,7 +31,7 @@ from fullyconnect.adapters import ReaderAdapter, WriterAdapter
 from fullyconnect.session import Session, OutgoingApplicationMessage, IncomingApplicationMessage, INCOMING, OUTGOING
 from fullyconnect.mqtt.constants import QOS_0, QOS_1, QOS_2
 from fullyconnect.plugins.manager import PluginManager
-from fullyconnect.errors import fullyconnectException, MQTTException, NoDataException
+from fullyconnect.errors import FullyConnectException, MQTTException, NoDataException
 
 import sys
 if sys.version_info < (3, 5):
@@ -178,7 +178,7 @@ class ProtocolHandler:
         if qos in (QOS_1, QOS_2):
             packet_id = self.session.next_packet_id
             if packet_id in self.session.inflight_out:
-                raise fullyconnectException("A message with the same packet ID '%d' is already in flight" % packet_id)
+                raise FullyConnectException("A message with the same packet ID '%d' is already in flight" % packet_id)
         else:
             packet_id = None
 
@@ -206,7 +206,7 @@ class ProtocolHandler:
         elif app_message.qos == QOS_2:
             yield from self._handle_qos2_message_flow(app_message)
         else:
-            raise fullyconnectException("Unexcepted QOS value '%d" % str(app_message.qos))
+            raise FullyConnectException("Unexcepted QOS value '%d" % str(app_message.qos))
 
     @asyncio.coroutine
     def _handle_qos0_message_flow(self, app_message):
@@ -244,7 +244,7 @@ class ProtocolHandler:
         """
         assert app_message.qos == QOS_1
         if app_message.puback_packet:
-            raise fullyconnectException("Message '%d' has already been acknowledged" % app_message.packet_id)
+            raise FullyConnectException("Message '%d' has already been acknowledged" % app_message.packet_id)
         if app_message.direction == OUTGOING:
             if app_message.packet_id not in self.session.inflight_out:
                 # Store message in session
@@ -289,13 +289,13 @@ class ProtocolHandler:
         assert app_message.qos == QOS_2
         if app_message.direction == OUTGOING:
             if app_message.pubrel_packet and app_message.pubcomp_packet:
-                raise fullyconnectException("Message '%d' has already been acknowledged" % app_message.packet_id)
+                raise FullyConnectException("Message '%d' has already been acknowledged" % app_message.packet_id)
             if not app_message.pubrel_packet:
                 # Store message
                 if app_message.publish_packet is not None:
                     # This is a retry flow, no need to store just check the message exists in session
                     if app_message.packet_id not in self.session.inflight_out:
-                        raise fullyconnectException("Unknown inflight message '%d' in session" % app_message.packet_id)
+                        raise FullyConnectException("Unknown inflight message '%d' in session" % app_message.packet_id)
                     publish_packet = app_message.build_publish_packet(dup=True)
                 else:
                     # Store message in session
@@ -310,7 +310,7 @@ class ProtocolHandler:
                     message = "Can't add PUBREC waiter, a waiter already exists for message Id '%s'" \
                               % app_message.packet_id
                     self.logger.warning(message)
-                    raise fullyconnectException(message)
+                    raise FullyConnectException(message)
                 waiter = asyncio.Future(loop=self._loop)
                 self._pubrec_waiters[app_message.packet_id] = waiter
                 yield from waiter

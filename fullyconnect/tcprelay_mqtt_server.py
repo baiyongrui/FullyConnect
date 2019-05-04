@@ -7,7 +7,7 @@ import logging
 from fullyconnect import cryptor, common
 from fullyconnect.adapters import StreamReaderAdapter, FlowControlMixin
 from fullyconnect.mqtt import packet_class
-from fullyconnect.errors import fullyconnectException, MQTTException, NoDataException
+from fullyconnect.errors import FullyConnectException, MQTTException, NoDataException
 from fullyconnect.mqtt.packet import (
     RESERVED_0, CONNECT, PUBLISH,
     SUBSCRIBE, SUBACK, UNSUBSCRIBE, UNSUBACK, PINGREQ, PINGRESP, DISCONNECT,
@@ -17,11 +17,16 @@ from fullyconnect.mqtt.pingreq import PingReqPacket
 from fullyconnect.mqtt.connect import ConnectPacket, ConnectPayload, ConnectVariableHeader
 from fullyconnect.mqtt.connack import ConnackPacket, ConnackVariableHeader
 from fullyconnect.mqtt.pingresp import PingRespPacket
+from fullyconnect.ConnectionGroup import ConnectionGroup
 
 logging.basicConfig(level=logging.DEBUG,
                     format='%(asctime)s %(levelname)-8s %(message)s',
                     datefmt='%Y-%m-%d %H:%M:%S')
 logger = logging.getLogger(__name__)
+
+
+connections = ConnectionGroup()
+topic_to_remote = {}
 
 
 class TCPRelayServer:
@@ -49,7 +54,6 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         self._loop = loop
         self._transport = None
         self._encryptor = cryptor.Cryptor(config['password'], config['method'])
-        self._topic_to_remote = {}
 
         self._peername = None
 
@@ -70,6 +74,7 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         self._peername = transport.get_extra_info('peername')
         self._transport = transport
 
+        connections.add_connection(self)
         logging.info("Mqtt client connected from: {}.".format(self._peername))
 
         self._stream_reader.set_transport(transport)
@@ -80,6 +85,7 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         self._loop.create_task(self.start())
 
     def connection_lost(self, exc):
+        connections.remove_connection(self)
         logging.info("Mqtt client connection{} lost.".format(self._peername))
         super().connection_lost(exc)
 
@@ -134,8 +140,9 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
                     self._transport.close()
                     self._transport = None
 
-                    for topic, remote in self._topic_to_remote.items():
-                        remote.close()
+                    # TODO close remote in topic_to_remote
+                    # for topic, remote in self._topic_to_remote.items():
+                    #     remote.close()
 
     @asyncio.coroutine
     def _reader_loop(self):
@@ -206,9 +213,9 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         yield from self.stop()
 
     # for remote read
-    def write(self, data, client_topic):
-        data = self._encryptor.encrypt(data)
-        packet = PublishPacket.build(client_topic, data, None, dup_flag=0, qos=0, retain=0)
+    def write(self, data, client_topic, packet_id):
+        # data = self._encryptor.encrypt(data)
+        packet = PublishPacket.build(client_topic, data, packet_id, dup_flag=0, qos=2, retain=0)
         ensure_future(self._do_write(packet), loop=self._loop)
 
     def _write_eof(self, client_topic):
@@ -252,6 +259,9 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
 
         if return_code != 0:
             self._loop.create_task(self.stop())
+        # else:
+        #     packet = PublishPacket.build("status", self._encryptor.encrypt(b"ok"), 0, dup_flag=0, qos=0, retain=0)
+        #     yield from self._do_write(packet)
 
     # @asyncio.coroutine
     def handle_publish(self, publish_packet: PublishPacket):
@@ -261,7 +271,7 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
             return
 
         data = bytes(publish_packet.data)
-        remote = self._topic_to_remote.get(publish_packet.topic_name, None)
+        remote = topic_to_remote.get(publish_packet.topic_name, None)
         if not publish_packet.retain_flag:
             data = self._encryptor.decrypt(data)
             if remote is None:    # we are in STAGE_ADDR
@@ -280,8 +290,8 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
                 logging.info("Connecting to remote {}:{} from mqtt client({}) connection{}.".format(
                     common.to_str(remote_addr), remote_port, publish_packet.topic_name, self._peername))
 
-                remote = RelayRemoteProtocol(self._loop, self, publish_packet.topic_name)
-                self._topic_to_remote[publish_packet.topic_name] = remote
+                remote = RelayRemoteProtocol(self._loop, publish_packet.topic_name)
+                topic_to_remote[publish_packet.topic_name] = remote
                 self._loop.create_task(self.create_connection(remote, common.to_str(remote_addr), remote_port))
 
                 if len(data) > header_length:
@@ -313,17 +323,16 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
     def remove_topic(self, topic):
         if self._transport is not None:
             self._write_eof(topic)
-        self._topic_to_remote.pop(topic, None)
+        topic_to_remote.pop(topic, None)
 
 
 class RelayRemoteProtocol(asyncio.Protocol):
 
-    def __init__(self, loop, server: MQTTServerProtocol, client_topic):
+    def __init__(self, loop, client_topic):
         self._loop = loop
         self._transport = None
         self._write_pending_data = []
         self._connected = False
-        self._server = server
         self.client_topic = client_topic
 
         self._peername = None
@@ -334,12 +343,14 @@ class RelayRemoteProtocol(asyncio.Protocol):
         self._timeout = 60
         self._timeout_handle = None
 
+        self._packet_id = 0
+
     def connection_made(self, transport):
         self._peername = transport.get_extra_info('peername')
         self._transport = transport
         self._connected = True
 
-        if self._server is None:
+        if len(connections) == 0:
             self._transport.close()
             return
 
@@ -354,16 +365,21 @@ class RelayRemoteProtocol(asyncio.Protocol):
     def connection_lost(self, exc):
         logging.info("Remote connection{} lost.".format(self._peername))
         self._transport = None
-        if self._server is not None:
-            self._server.remove_topic(self.client_topic)
-            self._server = None
+        if len(connections) > 0:
+            server = connections.pick_connection()
+            server.remove_topic(self.client_topic)
 
         self._timeout_handle.cancel()
         self._timeout_handle = None
 
     def data_received(self, data):
-        self._server.write(data, self.client_topic)
+        # TODO check len of connections
+        server = connections.pick_connection()
+        server.write(data, self.client_topic, self._packet_id)
 
+        self._packet_id += 1
+        if self._packet_id >= 65535:
+            self._packet_id = 0
         self._last_activity = self._loop.time()
 
     def write(self, data):
@@ -386,9 +402,10 @@ class RelayRemoteProtocol(asyncio.Protocol):
 
 
 if __name__ == "__main__":
-    server = TCPRelayServer({"password": "", "method": "aes-128-cfb", "timeout": 60, "port": 1883})
-    import uvloop
-    loop = uvloop.new_event_loop()
-    asyncio.set_event_loop(loop)
+    server = TCPRelayServer({"password": "44541992by", "method": "aes-128-cfb", "timeout": 60, "port": 1883})
+    # import uvloop
+    # loop = uvloop.new_event_loop()
+    # asyncio.set_event_loop(loop)
+    loop = asyncio.get_event_loop()
     server.add_to_loop(loop)
     loop.run_forever()
