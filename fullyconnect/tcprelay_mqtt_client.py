@@ -167,9 +167,7 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
 
         # send connect packet
         connect_vh = ConnectVariableHeader(keep_alive=self._keepalive_timeout)
-        connect_vh.password_flag = True
-        password = self._encryptor.encrypt(self._encryptor.password.encode('utf-8'))
-        connect_payload = ConnectPayload(client_id=ConnectPayload.gen_client_id(), password=password)
+        connect_payload = ConnectPayload(client_id=ConnectPayload.gen_client_id())
         connect_packet = ConnectPacket(vh=connect_vh, payload=connect_payload)
         yield from self._do_write(connect_packet)
 
@@ -183,7 +181,6 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
         self._data_task.cancel()
         logger.debug("waiting for tasks to be stopped")
         if not self._reader_task.done():
-
             if not self._reader_stopped.is_set():
                 self._reader_task.cancel()  # this will cause the reader_loop handle CancelledError
                 # yield from asyncio.wait(
@@ -301,35 +298,45 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
     @asyncio.coroutine
     def handle_connack(self, connack: ConnackPacket):
         if connack.variable_header.return_code == 0:
-            self._connected = True
-            logging.info("Connection to mqtt server established!")
-
-            if len(self._write_pending_data_topic) > 0:
-                self._keepalive_task.cancel()
-                for data, topic in self._write_pending_data_topic:
-                    data = self._encryptor.encrypt(data)
-                    packet = PublishPacket.build(topic, data, None, dup_flag=0, qos=0, retain=0)
-                    yield from self._do_write(packet)
-                self._write_pending_data_topic = []
-                self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
+            packet = PublishPacket.build("$SYS/auth",
+                                         self._encryptor.encrypt(self._encryptor.password.encode('utf-8')),
+                                         None, dup_flag=0, qos=0, retain=0)
+            yield from self._do_write(packet)
         else:
-            logging.info("Unable to create connection to mqtt server! Shuting down...")
+            logging.info("Unable to create connection to mqtt server! Shutting down...")
             self._loop.create_task(self.stop())
 
     # @asyncio.coroutine
     def handle_publish(self, publish_packet: PublishPacket):
         data = bytes(publish_packet.data)
-        # if publish_packet.qos == 0:
-        #     # packet for decipher iv
-        #     self._encryptor.decrypt(data)
-        #     return
+        if not self._connected:
+            if publish_packet.topic_name == "$SYS/auth":
+                password = self._encryptor.decrypt(data).decode('utf-8')
+                if password == self._encryptor.password:
+                    self._connected = True
+                    logging.info("Connection to mqtt server established!")
+
+                    if len(self._write_pending_data_topic) > 0:
+                        self._keepalive_task.cancel()
+                        for data, topic in self._write_pending_data_topic:
+                            data = self._encryptor.encrypt(data)
+                            packet = PublishPacket.build(topic, data, None, dup_flag=0, qos=0, retain=0)
+                            yield from self._do_write(packet)
+                        self._write_pending_data_topic = []
+                        self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
+                else:
+                    logging.info("Connection authorization failed! Shuting down...")
+                    self._loop.create_task(self.stop())
+            else:
+                self._loop.create_task(self.stop())
+            return
+
         server = topic_to_clients.get(publish_packet.topic_name, None)
         if server is None:
             logging.info("Received unregistered publish topic({0}) from mqtt server, packet will be ignored.".format(
                 publish_packet.topic_name))
-            # return
         if not publish_packet.retain_flag:    # retain=1 indicate we should close the client connection
-            # data = self._encryptor.decrypt(data)
+            data = self._encryptor.decrypt(data)
             if server is not None:
                 chunk = DataChunk(publish_packet.packet_id, data)
                 server.deliver(chunk)
@@ -407,12 +414,6 @@ class RelayServerProtocol(asyncio.Protocol):
         self._mqtt_client.write(data, self._topic)
 
     # handle remote read
-    def write(self, data):
-        data = self._encryptor.encrypt(data)
-        self._transport.write(data)
-
-        self._last_activity = self._loop.time()
-
     def deliver(self, chunk: DataChunk):
         index = chunk.chunk_index % len(self._chunks)
         # if self._chunks[index] is not None:
@@ -458,13 +459,13 @@ if __name__ == "__main__":
 
     config = {
         "mqtt_client": [
-            {"password": "44541992by", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883}
-            ,
-            {"password": "44541992by", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883}
-            ,
-            {"password": "44541992by", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883}
+            {"password": "", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883}
+            # ,
+            # {"password": "", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883}
+            # ,
+            # {"password": "", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883}
             ],
-        "server": {"password": "44541992by", "method": "rc4-md5", "timeout": 60, "port": 1370}}
+        "server": {"password": "", "method": "rc4-md5", "timeout": 60, "port": 1370}}
 
     server = TCPRelayServer(config)
     # import uvloop

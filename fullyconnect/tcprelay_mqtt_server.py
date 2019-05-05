@@ -54,6 +54,7 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         self._loop = loop
         self._transport = None
         self._encryptor = cryptor.Cryptor(config['password'], config['method'])
+        self._auth_ip = config['auth_ip']
 
         self._peername = None
 
@@ -244,14 +245,10 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
     @asyncio.coroutine
     def handle_connect(self, connect: ConnectPacket):
         return_code = 0
-        self._approved = True
 
-        password = self._encryptor.decrypt(connect.password)
-        password = password.decode('utf-8')
-        if password != self._encryptor.password:
-            return_code = 4
-            self._approved = False
-            logging.warning("Invalid ConnectPacket password from mqtt client connection{}!".format(self._peername))
+        if self._peername[0] != self._auth_ip:
+            return_code = 5
+            logging.warning("Not authorized connection: {}!".format(self._peername))
 
         connack_vh = ConnackVariableHeader(return_code=return_code)
         connack = ConnackPacket(variable_header=connack_vh)
@@ -259,15 +256,22 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
 
         if return_code != 0:
             self._loop.create_task(self.stop())
-        # else:
-        #     packet = PublishPacket.build("status", self._encryptor.encrypt(b"ok"), 0, dup_flag=0, qos=0, retain=0)
-        #     yield from self._do_write(packet)
 
     # @asyncio.coroutine
     def handle_publish(self, publish_packet: PublishPacket):
-
         if not self._approved:
-            self._loop.create_task(self.stop())
+            if publish_packet.topic_name == "$SYS/auth":
+                password = self._encryptor.decrypt(bytes(publish_packet.data)).decode('utf-8')
+                if password == self._encryptor.password:
+                    self._approved = True
+                    packet = PublishPacket.build("auth",
+                                                 self._encryptor.encrypt(self._encryptor.password.encode('utf-8')),
+                                                 None, dup_flag=0, qos=0, retain=0)
+                    yield from self._do_write(packet)
+                else:
+                    self._loop.create_task(self.stop())
+            else:
+                self._loop.create_task(self.stop())
             return
 
         data = bytes(publish_packet.data)
@@ -402,7 +406,7 @@ class RelayRemoteProtocol(asyncio.Protocol):
 
 
 if __name__ == "__main__":
-    server = TCPRelayServer({"password": "44541992by", "method": "aes-128-cfb", "timeout": 60, "port": 1883})
+    server = TCPRelayServer({"password": "", "method": "aes-128-cfb", "timeout": 60, "port": 1883, "auth_ip": "127.0.0.1"})
     # import uvloop
     # loop = uvloop.new_event_loop()
     # asyncio.set_event_loop(loop)
