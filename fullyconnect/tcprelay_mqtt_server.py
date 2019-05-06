@@ -215,14 +215,14 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
 
     # for remote read
     def write(self, data, client_topic, packet_id):
-        if self._transport.is_closing():
+        if self._transport is None or self._transport.is_closing():
             return
         data = self._encryptor.encrypt(data)
         packet = PublishPacket.build(client_topic, data, packet_id, dup_flag=0, qos=2, retain=0)
         ensure_future(self._do_write(packet), loop=self._loop)
 
     def _write_eof(self, client_topic):
-        if self._transport.is_closing():
+        if self._transport is None or self._transport.is_closing():
             return
         packet = PublishPacket.build(client_topic, b'', None, dup_flag=0, qos=0, retain=1)
         ensure_future(self._do_write(packet), loop=self._loop)
@@ -414,7 +414,7 @@ class RelayRemoteProtocol(asyncio.Protocol):
 
 
 if __name__ == "__main__":
-    server = TCPRelayServer({"password": "", "method": "aes-128-cfb", "timeout": 60, "port": 1883, "auth_ip": "127.0.0.1"})
+    server = TCPRelayServer({"password": "123456", "method": "aes-128-cfb", "timeout": 60, "port": 1883, "auth_ip": "10.0.7.11"})
     # import uvloop
     # loop = uvloop.new_event_loop()
     # asyncio.set_event_loop(loop)
