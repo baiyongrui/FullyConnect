@@ -174,8 +174,8 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
                         elif packet.fixed_header.packet_type == PINGRESP:
                             task = ensure_future(self.handle_pingresp(packet), loop=self._loop)
                         elif packet.fixed_header.packet_type == PUBLISH:
-                            # task = ensure_future(self.handle_publish(packet), loop=self._loop)
-                            self.handle_publish(packet)
+                            task = ensure_future(self.handle_publish(packet), loop=self._loop)
+                            # self.handle_publish(packet)
                         # elif packet.fixed_header.packet_type == SUBSCRIBE:
                         #     task = ensure_future(self.handle_subscribe(packet), loop=self._loop)
                         # elif packet.fixed_header.packet_type == UNSUBSCRIBE:
@@ -215,11 +215,15 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
 
     # for remote read
     def write(self, data, client_topic, packet_id):
-        # data = self._encryptor.encrypt(data)
+        if self._transport.is_closing():
+            return
+        data = self._encryptor.encrypt(data)
         packet = PublishPacket.build(client_topic, data, packet_id, dup_flag=0, qos=2, retain=0)
         ensure_future(self._do_write(packet), loop=self._loop)
 
     def _write_eof(self, client_topic):
+        if self._transport.is_closing():
+            return
         packet = PublishPacket.build(client_topic, b'', None, dup_flag=0, qos=0, retain=1)
         ensure_future(self._do_write(packet), loop=self._loop)
 
@@ -257,10 +261,10 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         if return_code != 0:
             self._loop.create_task(self.stop())
 
-    # @asyncio.coroutine
+    @asyncio.coroutine
     def handle_publish(self, publish_packet: PublishPacket):
         if not self._approved:
-            if publish_packet.topic_name == "$SYS/auth":
+            if publish_packet.topic_name == "auth":
                 password = self._encryptor.decrypt(bytes(publish_packet.data)).decode('utf-8')
                 if password == self._encryptor.password:
                     self._approved = True
@@ -324,6 +328,7 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
             logging.error("{} when creating remote connection to {}:{} from mqtt connection{}.".format(e, host, port, self._peername))
             self.remove_topic(remote.client_topic)
 
+    # TODO rename this
     def remove_topic(self, topic):
         if self._transport is not None:
             self._write_eof(topic)
@@ -341,8 +346,7 @@ class RelayRemoteProtocol(asyncio.Protocol):
 
         self._peername = None
 
-        # for read timeout
-        self._last_activity = 0
+        self._last_activity = 0     # for read timeout
         # TODO: from config
         self._timeout = 60
         self._timeout_handle = None
@@ -369,7 +373,8 @@ class RelayRemoteProtocol(asyncio.Protocol):
     def connection_lost(self, exc):
         logging.info("Remote connection{} lost.".format(self._peername))
         self._transport = None
-        if len(connections) > 0:
+        server = connections.pick_connection()
+        if server is not None:
             server = connections.pick_connection()
             server.remove_topic(self.client_topic)
 
@@ -377,8 +382,11 @@ class RelayRemoteProtocol(asyncio.Protocol):
         self._timeout_handle = None
 
     def data_received(self, data):
-        # TODO check len of connections
         server = connections.pick_connection()
+        if server is None:
+            logging.warning("No available client connections, closing relay target")
+            self.close()
+
         server.write(data, self.client_topic, self._packet_id)
 
         self._packet_id += 1

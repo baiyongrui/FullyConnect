@@ -15,10 +15,13 @@ class ConnectionGroup:
 
     # TODO: add more strategy
     def pick_connection(self):
-        client = self._container[self._cur % len(self._container)]
-        self._cur += 1
-
-        return client
+        items = len(self._container)
+        if items > 0:
+            client = self._container[self._cur % items]
+            self._cur += 1
+            return client
+        else:
+            return None
 
     def __len__(self):
         return len(self._container)

@@ -219,8 +219,8 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
                         elif packet.fixed_header.packet_type == PINGRESP:
                             task = ensure_future(self.handle_pingresp(packet), loop=self._loop)
                         elif packet.fixed_header.packet_type == PUBLISH:
-                            # task = ensure_future(self.handle_publish(packet), loop=self._loop)
-                            self.handle_publish(packet)
+                            task = ensure_future(self.handle_publish(packet), loop=self._loop)
+                            # self.handle_publish(packet)
                         # elif packet.fixed_header.packet_type == SUBSCRIBE:
                         #     task = ensure_future(self.handle_subscribe(packet), loop=self._loop)
                         # elif packet.fixed_header.packet_type == UNSUBSCRIBE:
@@ -260,6 +260,8 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
         yield from self.stop()
 
     def write(self, data: bytes, topic):
+        if self._transport.is_closing():
+            return
         if not self._connected:
             self._write_pending_data_topic.append((data, topic))
         else:
@@ -268,6 +270,8 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
             ensure_future(self._do_write(packet), loop=self._loop)
 
     def write_eof(self, topic):
+        if self._transport.is_closing:
+            return
         packet = PublishPacket.build(topic, b'', None, dup_flag=0, qos=0, retain=1)
         ensure_future(self._do_write(packet), loop=self._loop)
 
@@ -298,7 +302,7 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
     @asyncio.coroutine
     def handle_connack(self, connack: ConnackPacket):
         if connack.variable_header.return_code == 0:
-            packet = PublishPacket.build("$SYS/auth",
+            packet = PublishPacket.build("auth",
                                          self._encryptor.encrypt(self._encryptor.password.encode('utf-8')),
                                          None, dup_flag=0, qos=0, retain=0)
             yield from self._do_write(packet)
@@ -306,11 +310,11 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
             logging.info("Unable to create connection to mqtt server! Shutting down...")
             self._loop.create_task(self.stop())
 
-    # @asyncio.coroutine
+    @asyncio.coroutine
     def handle_publish(self, publish_packet: PublishPacket):
         data = bytes(publish_packet.data)
         if not self._connected:
-            if publish_packet.topic_name == "$SYS/auth":
+            if publish_packet.topic_name == "auth":
                 password = self._encryptor.decrypt(data).decode('utf-8')
                 if password == self._encryptor.password:
                     self._connected = True
@@ -385,6 +389,10 @@ class RelayServerProtocol(asyncio.Protocol):
         self._last_activity = self._loop.time()
         self._timeout_handle = self._loop.call_later(self._timeout, self.timeout_handler)
 
+        if self._mqtt_client is None:
+            logging.warning("No available client connections, closing relay target")
+            self.close()
+
         logging.info("Client({}) connected from: {}.".format(self._topic, self._peername))
 
     def connection_lost(self, exc):
@@ -408,7 +416,7 @@ class RelayServerProtocol(asyncio.Protocol):
                 self.close()
                 return
 
-            addrtype, remote_addr, remote_port, header_length = header_result
+            addrtype, remote_addr, remote_port, _ = header_result
             self._stage = STAGE_STREAM
 
         self._mqtt_client.write(data, self._topic)
@@ -416,8 +424,10 @@ class RelayServerProtocol(asyncio.Protocol):
     # handle remote read
     def deliver(self, chunk: DataChunk):
         index = chunk.chunk_index % len(self._chunks)
-        # if self._chunks[index] is not None:
-        #     self.close()
+        if self._chunks[index] is not None:
+            logging.warning("chunks overlapped, closing")
+            self.close()
+            return
         self._chunks[index] = chunk
 
         self.try_write()
@@ -460,8 +470,8 @@ if __name__ == "__main__":
     config = {
         "mqtt_client": [
             {"password": "", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883}
-            # ,
-            # {"password": "", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883}
+            ,
+            {"password": "", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883}
             # ,
             # {"password": "", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883}
             ],
