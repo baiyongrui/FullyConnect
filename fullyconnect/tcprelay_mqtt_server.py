@@ -371,7 +371,7 @@ class RelayRemoteProtocol(asyncio.Protocol):
         self._timeout_handle = self._loop.call_later(self._timeout, self.timeout_handler)
 
     def connection_lost(self, exc):
-        logging.info("Remote connection{} lost.".format(self._peername))
+        logging.info("Remote connection{}_{} lost.".format(self._peername, self.client_topic))
         self._transport = None
         server = connections.pick_connection()
         if server is not None:
@@ -386,6 +386,7 @@ class RelayRemoteProtocol(asyncio.Protocol):
         if server is None:
             logging.warning("No available client connections, closing relay target")
             self.close()
+            return
 
         server.write(data, self.client_topic, self._packet_id)
 
@@ -414,7 +415,7 @@ class RelayRemoteProtocol(asyncio.Protocol):
 
 
 if __name__ == "__main__":
-    server = TCPRelayServer({"password": "123456", "method": "aes-128-cfb", "timeout": 60, "port": 1883, "auth_ip": "10.0.7.11"})
+    server = TCPRelayServer({"password": "123456", "method": "aes-128-cfb", "timeout": 60, "port": 1883, "auth_ip": "127.0.0.1"})
     # import uvloop
     # loop = uvloop.new_event_loop()
     # asyncio.set_event_loop(loop)

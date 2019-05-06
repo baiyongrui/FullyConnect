@@ -260,7 +260,7 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
         yield from self.stop()
 
     def write(self, data: bytes, topic):
-        if self._transport.is_closing():
+        if self._transport is None or self._transport.is_closing():
             return
         if not self._connected:
             self._write_pending_data_topic.append((data, topic))
@@ -270,7 +270,7 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
             ensure_future(self._do_write(packet), loop=self._loop)
 
     def write_eof(self, topic):
-        if self._transport.is_closing:
+        if self._transport is None or self._transport.is_closing():
             return
         packet = PublishPacket.build(topic, b'', None, dup_flag=0, qos=0, retain=1)
         ensure_future(self._do_write(packet), loop=self._loop)
@@ -398,6 +398,7 @@ class RelayServerProtocol(asyncio.Protocol):
     def connection_lost(self, exc):
         logging.info("Client({}) connection{} lost.".format(self._topic, self._peername))
         if not self._manual_close:
+            # Tell the mqtt server close relay target connection ASAP
             self._mqtt_client.write_eof(self._topic)
         self._transport = None
         topic_to_clients.pop(self._topic, None)
@@ -469,13 +470,13 @@ if __name__ == "__main__":
 
     config = {
         "mqtt_client": [
-            {"password": "", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883}
+            {"password": "123456", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883}
             ,
-            {"password": "", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883}
+            {"password": "123456", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883}
             # ,
             # {"password": "", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883}
             ],
-        "server": {"password": "", "method": "rc4-md5", "timeout": 60, "port": 1370}}
+        "server": {"password": "123456", "method": "rc4-md5", "timeout": 60, "port": 1370}}
 
     server = TCPRelayServer(config)
     # import uvloop
