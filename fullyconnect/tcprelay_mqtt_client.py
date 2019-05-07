@@ -381,7 +381,7 @@ class RelayServerProtocol(asyncio.Protocol):
         self._encryptor = cryptor.Cryptor(config['password'], config['method'])
 
         self._cur_chunk_index = 0
-        self._chunks = [None for i in range(1000)]
+        self._chunks = [None for _ in range(512)]
 
     def connection_made(self, transport):
         self._peername = transport.get_extra_info('peername')
@@ -424,11 +424,21 @@ class RelayServerProtocol(asyncio.Protocol):
 
     # handle remote read
     def deliver(self, chunk: DataChunk):
-        index = chunk.chunk_index % len(self._chunks)
+        chunk_size = len(self._chunks)
+        index = chunk.chunk_index % chunk_size
+
         if self._chunks[index] is not None:
-            logging.warning("chunks overlapped, closing")
-            self.close()
-            return
+            logging.warning("chunks overlapped")
+            if len(self._chunks) < 4096:
+                space = [None for _ in range(chunk_size)]
+                self._chunks.extend(space)
+                index = chunk.chunk_index % len(self._chunks)
+                logging.warning("chunks extended to size {}".format(len(self._chunks)))
+            else:
+                logging.warning("chunks reached maximum limit, closing")
+                self.close()
+                return
+
         self._chunks[index] = chunk
 
         self.try_write()
