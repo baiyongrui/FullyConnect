@@ -290,7 +290,7 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
                 remote.write(data)
         else:
             if remote is not None:
-                remote.close()
+                remote.close(force=True)
 
     @asyncio.coroutine
     def handle_pingresp(self, pingresp: PingRespPacket):
@@ -372,9 +372,12 @@ class RelayRemoteProtocol(asyncio.Protocol):
         else:
             self._transport.write(data)
 
-    def close(self):
+    def close(self, force=False):
         if self._transport:
-            self._transport.close()
+            if force:
+                self._transport.abort()
+            else:
+                self._transport.close()
 
     def timeout_handler(self):
         after = self._last_activity - self._loop.time() + self._timeout
@@ -386,9 +389,10 @@ class RelayRemoteProtocol(asyncio.Protocol):
 
 
 if __name__ == "__main__":
-    server = TCPRelayServer({"password": "", "method": "aes-128-cfb", "timeout": 60, "port": 1883})
+    server = TCPRelayServer({"password": "123456", "method": "aes-128-cfb", "timeout": 60, "port": 1883})
     import uvloop
     loop = uvloop.new_event_loop()
     asyncio.set_event_loop(loop)
+    # loop = asyncio.get_event_loop()
     server.add_to_loop(loop)
     loop.run_forever()

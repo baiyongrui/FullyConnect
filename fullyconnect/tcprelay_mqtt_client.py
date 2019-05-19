@@ -24,9 +24,6 @@ logging.basicConfig(level=logging.DEBUG,
                         datefmt='%Y-%m-%d %H:%M:%S')
 logger = logging.getLogger(__name__)
 
-STAGE_ADDR = 1
-STAGE_STREAM = 2
-
 
 def topic_generator():
     seq = 0
@@ -321,14 +318,13 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
         if server is None:
             logging.info("Received unregistered publish topic({0}) from mqtt server, packet will be ignored.".format(
                 publish_packet.topic_name))
-            server = None
         if not publish_packet.retain_flag:    # retain=1 indicate we should close the client connection
             data = self._encryptor.decrypt(data)
             if server is not None:
                 server.write(data)
         else:
             if server is not None:
-                server.close()
+                server.close(force=True)
 
     @asyncio.coroutine
     def handle_pingresp(self, pingresp: PingRespPacket):
@@ -353,7 +349,7 @@ class RelayServerProtocol(asyncio.Protocol):
         self._loop = loop
         self._transport = None
 
-        self._stage = STAGE_ADDR
+        self._address_parsed = False
         self._mqtt_client = mqtt_client_groups.pick_client()
 
         self._peername = None
@@ -390,15 +386,15 @@ class RelayServerProtocol(asyncio.Protocol):
 
         # verify packet
         data = self._encryptor.decrypt(data)
-        if self._stage == STAGE_ADDR:
+        if not self._address_parsed:
             header_result = common.parse_header(data)
             if header_result is None:
                 logging.error("Can not parse header when handling client connection{0}".format(self._peername))
-                self.close()
+                self.close(force=True)
                 return
 
             addrtype, remote_addr, remote_port, header_length = header_result
-            self._stage = STAGE_STREAM
+            self._address_parsed = True
 
         self._mqtt_client.write(data, self._topic)
 
@@ -409,10 +405,13 @@ class RelayServerProtocol(asyncio.Protocol):
 
         self._last_activity = self._loop.time()
 
-    def close(self):
+    def close(self, force=False):
         self._manual_close = True
         if self._transport is not None:
-            self._transport.close()
+            if force:
+                self._transport.abort()
+            else:
+                self._transport.close()
 
     def timeout_handler(self):
         after = self._last_activity - self._loop.time() + self._timeout
@@ -427,13 +426,16 @@ if __name__ == "__main__":
 
     config = {
         "mqtt_client": [
-            {"password": "", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883},
-            {"password": "", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883}],
-        "server": {"password": "", "method": "rc4-md5", "timeout": 60, "port": 1370}}
+            {"password": "123456", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883}
+            # ,
+            # {"password": "", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883}
+        ],
+        "server": {"password": "123456", "method": "rc4-md5", "timeout": 60, "port": 1370}}
 
     server = TCPRelayServer(config)
     import uvloop
     loop = uvloop.new_event_loop()
     asyncio.set_event_loop(loop)
+    # loop = asyncio.get_event_loop()
     server.add_to_loop(loop)
     loop.run_forever()
