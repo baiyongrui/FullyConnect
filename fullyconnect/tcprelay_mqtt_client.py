@@ -48,7 +48,8 @@ class TCPRelayServer:
         self._loop = loop
 
         self._mqtt_client_groups = MQTTClientGroups()
-        for client_config in self._config['mqtt_client']:
+        client_config = self._config['mqtt_client']
+        for n in range(client_config['count']):
             mqtt_client = MQTTClientProtocol(loop, client_config)
             self._mqtt_client_groups.add_client(mqtt_client)
             self._loop.create_task(mqtt_client.create_connection())
@@ -259,6 +260,8 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
     def write(self, data: bytes, topic):
         if not self._connected:
             self._write_pending_data_topic.append((data, topic))
+            if len(self._write_pending_data_topic) > 50:
+                self._write_pending_data_topic.clear()
         else:
             data = self._encryptor.encrypt(data)
             packet = PublishPacket.build(topic, data, None, dup_flag=0, qos=0, retain=0)
@@ -425,12 +428,10 @@ class RelayServerProtocol(asyncio.Protocol):
 if __name__ == "__main__":
 
     config = {
-        "mqtt_client": [
-            {"password": "123456", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883}
-            # ,
-            # {"password": "", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883}
-        ],
-        "server": {"password": "123456", "method": "rc4-md5", "timeout": 60, "port": 1370}}
+        "mqtt_client":
+            {"password": "123456", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883, "count": 2},
+        "server":
+            {"password": "123456", "method": "rc4-md5", "timeout": 60, "port": 1370}}
 
     server = TCPRelayServer(config)
     import uvloop
