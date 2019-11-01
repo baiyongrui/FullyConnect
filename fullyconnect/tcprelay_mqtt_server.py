@@ -330,8 +330,7 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
 
     # TODO rename this
     def remove_topic(self, topic):
-        if self._transport is not None:
-            self._write_eof(topic)
+        self._write_eof(topic)
         topic_to_remote.pop(topic, None)
 
 

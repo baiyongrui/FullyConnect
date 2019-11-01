@@ -18,7 +18,7 @@ from fullyconnect.mqtt.connect import ConnectPacket, ConnectPayload, ConnectVari
 from fullyconnect.mqtt.connack import ConnackPacket, ConnackVariableHeader
 from fullyconnect.mqtt.pingresp import PingRespPacket
 from fullyconnect.ConnectionGroup import ConnectionGroup
-from fullyconnect.DataChunk import DataChunk
+from fullyconnect.DataChunk import DataChunk, ChunkCache
 
 import traceback
 
@@ -380,8 +380,7 @@ class RelayServerProtocol(asyncio.Protocol):
 
         self._encryptor = cryptor.Cryptor(config['password'], config['method'])
 
-        self._cur_chunk_index = 0
-        self._chunks = [None for _ in range(512)]
+        self._chunk_cache = ChunkCache()
 
     def connection_made(self, transport):
         self._peername = transport.get_extra_info('peername')
@@ -424,40 +423,14 @@ class RelayServerProtocol(asyncio.Protocol):
 
     # handle remote read
     def deliver(self, chunk: DataChunk):
-        chunk_size = len(self._chunks)
-        index = chunk.chunk_index % chunk_size
+        if not self._chunk_cache.store(chunk):
+            logging.warning("chunks reached maximum limit, closing")
+            self.close()
+            return
 
-        if self._chunks[index] is not None:
-            logging.warning("chunks overlapped")
-            if len(self._chunks) < 4096:
-                space = [None for _ in range(chunk_size)]
-                self._chunks.extend(space)
-                index = chunk.chunk_index % len(self._chunks)
-                logging.warning("chunks extended to size {}".format(len(self._chunks)))
-            else:
-                logging.warning("chunks reached maximum limit, closing")
-                self.close()
-                return
-
-        self._chunks[index] = chunk
-
-        self.try_write()
-
-    def try_write(self):
-        buf = bytearray()
-        while True:
-            chunk = self._chunks[self._cur_chunk_index]
-            if chunk is not None:
-                buf.extend(chunk.data)
-                self._chunks[self._cur_chunk_index] = None
-                self._cur_chunk_index += 1
-                if self._cur_chunk_index >= len(self._chunks):
-                    self._cur_chunk_index = 0
-            else:
-                break
-
-        if len(buf) > 0:
-            data = self._encryptor.encrypt(bytes(buf))
+        out = self._chunk_cache.dump()
+        if len(out) > 0:
+            data = self._encryptor.encrypt(bytes(out))
             self._transport.write(data)
 
             self._last_activity = self._loop.time()
