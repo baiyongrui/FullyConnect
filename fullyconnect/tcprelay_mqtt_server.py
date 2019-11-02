@@ -350,7 +350,7 @@ class RelayTargetProtocol(asyncio.Protocol):
         self._timeout = 60
         self._timeout_handle = None
 
-        self._packet_id = 0
+        self._chunk_id = 0
 
     def connection_made(self, transport):
         self._peername = transport.get_extra_info('peername')
@@ -385,7 +385,10 @@ class RelayTargetProtocol(asyncio.Protocol):
         self._last_activity = self._loop.time()
 
     def data_distribute(self, data, parts=2):
-        chunk_size = len(data) // parts
+        chunk_size = len(data)
+        if chunk_size > parts:
+            chunk_size = len(data) // parts
+
         while len(data) > 0:
             chunk = data[:chunk_size]
             data = data[chunk_size:]
@@ -394,11 +397,11 @@ class RelayTargetProtocol(asyncio.Protocol):
                 logging.warning("No available client connections, closing relay target")
                 self.close()
                 return
-            conn.write(chunk, self.client_topic, self._packet_id)
+            conn.write(chunk, self.client_topic, self._chunk_id)
 
-            self._packet_id += 1
-            if self._packet_id >= 65535:
-                self._packet_id = 0
+            self._chunk_id += 1
+            if self._chunk_id >= 4096:
+                self._chunk_id = 0
 
     def write(self, data):
         if not self._connected:
