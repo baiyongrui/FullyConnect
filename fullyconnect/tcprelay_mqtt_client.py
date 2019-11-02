@@ -101,7 +101,8 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
     async def create_connection(self):
         try:
             # TODO handle pending task
-            transport, protocol = await self._loop.create_connection(lambda: self, self._config['address'], self._config['port'])
+            transport, protocol = await self._loop.create_connection(lambda: self, self._config['address'], self._config['port'],
+                                                                     local_addr=(self._config['source_ip'], 0))
         except OSError as e:
             logging.error("{0} when connecting to mqtt server({1}:{2})".format(e, self._config['address'], self._config['port']))
             logging.error("Reconnection will be performed after 5s...")
@@ -453,9 +454,11 @@ if __name__ == "__main__":
 
     config = {
         "mqtt_client": [
-            {"password": "123456", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883}
+            {"password": "123456", "method": "aes-128-cfb", "timeout": 60, "address": "10.0.0.236", "port": 1883,
+             "source_ip": "10.0.0.236"}
             ,
-            {"password": "123456", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883}
+            {"password": "123456", "method": "aes-128-cfb", "timeout": 60, "address": "10.0.0.236", "port": 1883,
+             "source_ip": "10.0.0.236"}
             # ,
             # {"password": "", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883}
             ],

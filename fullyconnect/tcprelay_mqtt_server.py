@@ -54,7 +54,7 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         self._loop = loop
         self._transport = None
         self._encryptor = cryptor.Cryptor(config['password'], config['method'])
-        self._auth_ip = config['auth_ip']
+        # self._auth_ip = config['auth_ip']
 
         self._peername = None
 
@@ -250,9 +250,9 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
     def handle_connect(self, connect: ConnectPacket):
         return_code = 0
 
-        if self._peername[0] != self._auth_ip:
-            return_code = 5
-            logging.warning("Not authorized connection: {}!".format(self._peername))
+        # if self._peername[0] != self._auth_ip:
+        #     return_code = 5
+        #     logging.warning("Not authorized connection: {}!".format(self._peername))
 
         connack_vh = ConnackVariableHeader(return_code=return_code)
         connack = ConnackPacket(variable_header=connack_vh)
@@ -279,10 +279,10 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
             return
 
         data = bytes(publish_packet.data)
-        remote = topic_to_remote.get(publish_packet.topic_name, None)
+        target = topic_to_remote.get(publish_packet.topic_name, None)
         if not publish_packet.retain_flag:
             data = self._encryptor.decrypt(data)
-            if remote is None:    # we are in STAGE_ADDR
+            if target is None:    # we are in STAGE_ADDR
                 if not data:
                     self._write_eof(publish_packet.topic_name)
                     return
@@ -298,17 +298,17 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
                 logging.info("Connecting to remote {}:{} from mqtt client({}) connection{}.".format(
                     common.to_str(remote_addr), remote_port, publish_packet.topic_name, self._peername))
 
-                remote = RelayRemoteProtocol(self._loop, publish_packet.topic_name)
-                topic_to_remote[publish_packet.topic_name] = remote
-                self._loop.create_task(self.create_connection(remote, common.to_str(remote_addr), remote_port))
+                target = RelayTargetProtocol(self._loop, publish_packet.topic_name)
+                topic_to_remote[publish_packet.topic_name] = target
+                self._loop.create_task(self.create_connection(target, common.to_str(remote_addr), remote_port))
 
                 if len(data) > header_length:
-                    remote.write(data[header_length:])
+                    target.write(data[header_length:])
             else:   # now in STAGE_STREAM
-                remote.write(data)
+                target.write(data)
         else:
-            if remote is not None:
-                remote.close()
+            if target is not None:
+                target.close()
 
     @asyncio.coroutine
     def handle_pingresp(self, pingresp: PingRespPacket):
@@ -334,7 +334,7 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         topic_to_remote.pop(topic, None)
 
 
-class RelayRemoteProtocol(asyncio.Protocol):
+class RelayTargetProtocol(asyncio.Protocol):
 
     def __init__(self, loop, client_topic):
         self._loop = loop
@@ -381,18 +381,24 @@ class RelayRemoteProtocol(asyncio.Protocol):
         self._timeout_handle = None
 
     def data_received(self, data):
-        server = connections.pick_connection()
-        if server is None:
-            logging.warning("No available client connections, closing relay target")
-            self.close()
-            return
-
-        server.write(data, self.client_topic, self._packet_id)
-
-        self._packet_id += 1
-        if self._packet_id >= 65535:
-            self._packet_id = 0
+        self.data_distribute(data)
         self._last_activity = self._loop.time()
+
+    def data_distribute(self, data, parts=2):
+        chunk_size = len(data) // parts
+        while len(data) > 0:
+            chunk = data[:chunk_size]
+            data = data[chunk_size:]
+            conn = connections.pick_connection()
+            if server is None:
+                logging.warning("No available client connections, closing relay target")
+                self.close()
+                return
+            conn.write(chunk, self.client_topic, self._packet_id)
+
+            self._packet_id += 1
+            if self._packet_id >= 65535:
+                self._packet_id = 0
 
     def write(self, data):
         if not self._connected:
@@ -414,7 +420,7 @@ class RelayRemoteProtocol(asyncio.Protocol):
 
 
 if __name__ == "__main__":
-    server = TCPRelayServer({"password": "123456", "method": "aes-128-cfb", "timeout": 60, "port": 1883, "auth_ip": "127.0.0.1"})
+    server = TCPRelayServer({"password": "123456", "method": "aes-128-cfb", "timeout": 60, "port": 1883})
     # import uvloop
     # loop = uvloop.new_event_loop()
     # asyncio.set_event_loop(loop)
