@@ -18,6 +18,7 @@ from fullyconnect.mqtt.connect import ConnectPacket, ConnectPayload, ConnectVari
 from fullyconnect.mqtt.connack import ConnackPacket, ConnackVariableHeader
 from fullyconnect.mqtt.pingresp import PingRespPacket
 from fullyconnect.ConnectionGroup import ConnectionGroup
+from fullyconnect.DataChunk import DataChunk, ChunkGenerator
 
 logging.basicConfig(level=logging.DEBUG,
                     format='%(asctime)s %(levelname)-8s %(message)s',
@@ -214,11 +215,11 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         yield from self.stop()
 
     # for remote read
-    def write(self, data, client_topic, packet_id):
+    def write(self, chunk: DataChunk, client_topic: str):
         if self._transport is None or self._transport.is_closing():
             return
-        data = self._encryptor.encrypt(data)
-        packet = PublishPacket.build(client_topic, data, packet_id, dup_flag=0, qos=2, retain=0)
+        data = self._encryptor.encrypt(chunk.data)
+        packet = PublishPacket.build(client_topic, data, chunk.id, dup_flag=0, qos=2, retain=0)
         ensure_future(self._do_write(packet), loop=self._loop)
 
     def _write_eof(self, client_topic):
@@ -350,7 +351,7 @@ class RelayTargetProtocol(asyncio.Protocol):
         self._timeout = 60
         self._timeout_handle = None
 
-        self._chunk_id = 0
+        self._chunk_generator = ChunkGenerator()
 
     def connection_made(self, transport):
         self._peername = transport.get_extra_info('peername')
@@ -381,27 +382,15 @@ class RelayTargetProtocol(asyncio.Protocol):
         self._timeout_handle = None
 
     def data_received(self, data):
-        self.data_distribute(data)
-        self._last_activity = self._loop.time()
-
-    def data_distribute(self, data, parts=2):
-        chunk_size = len(data)
-        if chunk_size > parts:
-            chunk_size = len(data) // parts
-
-        while len(data) > 0:
-            chunk = data[:chunk_size]
-            data = data[chunk_size:]
+        chunks = self._chunk_generator.split(data)
+        for chunk in chunks:
             conn = connections.pick_connection()
-            if server is None:
+            if conn is None:
                 logging.warning("No available client connections, closing relay target")
                 self.close()
                 return
-            conn.write(chunk, self.client_topic, self._chunk_id)
-
-            self._chunk_id += 1
-            if self._chunk_id >= 4096:
-                self._chunk_id = 0
+            conn.write(chunk, self.client_topic)
+        self._last_activity = self._loop.time()
 
     def write(self, data):
         if not self._connected:
