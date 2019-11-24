@@ -149,10 +149,7 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
     def consume(self):
         while self._transport is not None:
             packet = yield from self._queue.get()
-            if packet is None:
-                break
-
-            if self._transport is None:
+            if self._transport is None or packet is None:
                 break
             yield from self._send_packet(packet)
 

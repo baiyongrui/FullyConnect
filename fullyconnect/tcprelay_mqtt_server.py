@@ -109,10 +109,7 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
     def consume(self):
         while self._transport is not None:
             packet = yield from self._queue.get()
-            if packet is None:
-                break
-
-            if self._transport is None:
+            if self._transport is None or packet is None:
                 break
             yield from self._send_packet(packet)
 
@@ -382,6 +379,8 @@ class RelayTargetProtocol(asyncio.Protocol):
         self._timeout_handle = None
 
     def data_received(self, data):
+        if not self._connected:
+            return
         chunks = self._chunk_generator.split(data)
         for chunk in chunks:
             conn = connections.pick_connection()
@@ -399,8 +398,10 @@ class RelayTargetProtocol(asyncio.Protocol):
             self._transport.write(data)
 
     def close(self):
+        self._connected = False
         if self._transport:
-            self._transport.close()
+            # self._transport.close()
+            self._transport.abort()
 
     def timeout_handler(self):
         after = self._last_activity - self._loop.time() + self._timeout

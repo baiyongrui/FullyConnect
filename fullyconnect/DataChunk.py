@@ -1,5 +1,5 @@
 
-MAX_CHUNKS = 8192
+MAX_CHUNKS = 16384
 
 
 class DataChunk:

@@ -28,9 +28,9 @@ class ConnectionGroup:
 
 
 if __name__ == "__main__":
-    groups = ConnectionGroup()
-    groups.add_connection("c1")
-    groups.add_connection("c2")
+    group = ConnectionGroup()
+    group.add_connection("c1")
+    group.add_connection("c2")
 
     for i in range(20):
-        print(groups.pick_connection())
+        print(group.pick_connection())
