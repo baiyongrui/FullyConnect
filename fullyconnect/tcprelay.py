@@ -20,7 +20,7 @@ class TCPRelayServer:
     def add_to_loop(self, loop):
         self._loop = loop
         coro = loop.create_server(lambda: RelayServerProtocol(self._loop, self._config),
-                                  self._config['server'], self._config['server_port'])
+                                  '0.0.0.0', self._config['port'])
         self._server = loop.run_until_complete(coro)
 
     def close(self):
@@ -169,3 +169,13 @@ class RelayRemoteProtocol(asyncio.Protocol):
         self._server = None
         if self._transport:
             self._transport.close()
+
+
+if __name__ == '__main__':
+    server = TCPRelayServer({"password": "123456", "method": "aes-128-cfb", "timeout": 60, "port": 1370})
+    # import uvloop
+    # loop = uvloop.new_event_loop()
+    # asyncio.set_event_loop(loop)
+    loop = asyncio.get_event_loop()
+    server.add_to_loop(loop)
+    loop.run_forever()
