@@ -18,7 +18,7 @@ from fullyconnect.mqtt.connect import ConnectPacket, ConnectPayload, ConnectVari
 from fullyconnect.mqtt.connack import ConnackPacket, ConnackVariableHeader
 from fullyconnect.mqtt.pingresp import PingRespPacket
 from fullyconnect.ConnectionGroup import ConnectionGroup
-from fullyconnect.DataChunk import DataChunk, ChunkGenerator
+from fullyconnect.DataChunk import DataChunk, ChunkType, ChunkGenerator
 
 logging.basicConfig(level=logging.DEBUG,
                     format='%(asctime)s %(levelname)-8s %(message)s',
@@ -211,19 +211,17 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         logging.debug("{} Reader coro stopped".format(self._peername))
         yield from self.stop()
 
-    # for remote read
-    def write(self, chunk: DataChunk, client_topic: str):
+    # for target data_received
+    def write(self, chunk: DataChunk):
         if self._transport is None or self._transport.is_closing():
             return
-        data = self._encryptor.encrypt(chunk.data)
-        packet = PublishPacket.build(client_topic, data, chunk.id, dup_flag=0, qos=2, retain=0)
-        ensure_future(self._do_write(packet), loop=self._loop)
-
-    def _write_eof(self, client_topic):
-        if self._transport is None or self._transport.is_closing():
-            return
-        packet = PublishPacket.build(client_topic, b'', None, dup_flag=0, qos=0, retain=1)
-        ensure_future(self._do_write(packet), loop=self._loop)
+        if chunk.type == ChunkType.Data:
+            data = self._encryptor.encrypt(chunk.data)
+            packet = PublishPacket.build(chunk.connection_id, data, chunk.id, dup_flag=0, qos=2, retain=0)
+            ensure_future(self._do_write(packet), loop=self._loop)
+        elif chunk.type == ChunkType.Disconnect:
+            packet = PublishPacket.build(chunk.connection_id, b'', chunk.id, dup_flag=0, qos=2, retain=1)
+            ensure_future(self._do_write(packet), loop=self._loop)
 
     @asyncio.coroutine
     def _do_write(self, packet):
@@ -281,22 +279,23 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         if not publish_packet.retain_flag:
             data = self._encryptor.decrypt(data)
             if target is None:    # we are in STAGE_ADDR
+                target = RelayTargetProtocol(self._loop, publish_packet.topic_name)
+
                 if not data:
-                    self._write_eof(publish_packet.topic_name)
+                    target.send_disconnect()
                     return
 
                 header_result = common.parse_header(data)
                 if header_result is None:
                     logging.error("Can not parse header when handling mqtt client({}) connection{}.".format(
                         publish_packet.topic_name, self._peername))
-                    self._write_eof(publish_packet.topic_name)
+                    target.send_disconnect()
                     return
 
                 addrtype, remote_addr, remote_port, header_length = header_result
                 logging.info("Connecting to remote {}:{} from mqtt client({}) connection{}.".format(
                     common.to_str(remote_addr), remote_port, publish_packet.topic_name, self._peername))
 
-                target = RelayTargetProtocol(self._loop, publish_packet.topic_name)
                 topic_to_target[publish_packet.topic_name] = target
                 self._loop.create_task(self.create_connection(target, common.to_str(remote_addr), remote_port))
 
@@ -318,18 +317,14 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         ping_resp = PingRespPacket()
         yield from self._do_write(ping_resp)
 
-    async def create_connection(self, remote, host, port):
+    async def create_connection(self, target, host, port):
         try:
             #TODO handle pending task
-            transport, protocol = await self._loop.create_connection(lambda: remote, host, port)
+            transport, protocol = await self._loop.create_connection(lambda: target, host, port)
         except OSError as e:
             logging.error("{} when creating remote connection to {}:{} from mqtt connection{}.".format(e, host, port, self._peername))
-            self.remove_topic(remote.client_topic)
-
-    # TODO rename this
-    def remove_topic(self, topic):
-        self._write_eof(topic)
-        topic_to_target.pop(topic, None)
+            target.send_disconnect()
+            topic_to_target.pop(target.client_topic, None)
 
 
 class RelayTargetProtocol(asyncio.Protocol):
@@ -370,10 +365,9 @@ class RelayTargetProtocol(asyncio.Protocol):
     def connection_lost(self, exc):
         logging.info("Remote connection{}_{} lost.".format(self._peername, self.client_topic))
         self._transport = None
-        server = connections.pick_connection()
-        if server is not None:
-            server = connections.pick_connection()
-            server.remove_topic(self.client_topic)
+
+        self.send_disconnect()
+        topic_to_target.pop(self.client_topic, None)
 
         self._timeout_handle.cancel()
         self._timeout_handle = None
@@ -381,15 +375,24 @@ class RelayTargetProtocol(asyncio.Protocol):
     def data_received(self, data):
         if not self._connected:
             return
-        chunks = self._chunk_generator.split(data)
+        self.send_data(data)
+        self._last_activity = self._loop.time()
+
+    def send_data(self, data: bytes):
+        chunks = self._chunk_generator.fragment(self.client_topic, data)
         for chunk in chunks:
-            conn = connections.pick_connection()
-            if conn is None:
-                logging.warning("No available client connections, closing relay target")
+            mqtt_carrier = connections.pick_connection()
+            if mqtt_carrier is None:
+                logging.warning("No mqtt carrier available, closing relay target")
                 self.close()
                 return
-            conn.write(chunk, self.client_topic)
-        self._last_activity = self._loop.time()
+            mqtt_carrier.write(chunk)
+
+    def send_disconnect(self):
+        chunk = DataChunk.build_disconnect_chunk(self._chunk_generator.get_chunk_id(), self.client_topic)
+        mqtt_carrier = connections.pick_connection()
+        if mqtt_carrier is not None:
+            mqtt_carrier.write(chunk)
 
     def write(self, data):
         if not self._connected:

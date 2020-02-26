@@ -18,7 +18,7 @@ from fullyconnect.mqtt.connect import ConnectPacket, ConnectPayload, ConnectVari
 from fullyconnect.mqtt.connack import ConnackPacket, ConnackVariableHeader
 from fullyconnect.mqtt.pingresp import PingRespPacket
 from fullyconnect.ConnectionGroup import ConnectionGroup
-from fullyconnect.DataChunk import DataChunk, ChunkCache
+from fullyconnect.DataChunk import DataChunk, ChunkProcessor, ChunkType
 
 import traceback
 
@@ -333,18 +333,19 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
                 self._loop.create_task(self.stop())
             return
 
-        server = topic_to_clients.get(publish_packet.topic_name, None)
-        if server is None:
-            logging.info("Received unregistered publish topic({0}) from mqtt server, packet will be ignored.".format(
-                publish_packet.topic_name))
-        if not publish_packet.retain_flag:    # retain=1 indicate we should close the client connection
-            data = self._encryptor.decrypt(data)
-            if server is not None:
-                chunk = DataChunk(publish_packet.packet_id, data)
-                server.deliver(chunk)
+        #
+        if publish_packet.retain_flag:  # retain=1 indicate we should close the client connection
+            chunk = DataChunk.build_disconnect_chunk(publish_packet.packet_id, publish_packet.topic_name)
         else:
-            if server is not None:
-                server.close()
+            data = self._encryptor.decrypt(data)    # decrypt data first as the data encrypt with corresponding IV
+            chunk = DataChunk.build_data_chunk(publish_packet.packet_id, publish_packet.topic_name, data)
+        client = topic_to_clients.get(chunk.connection_id, None)
+        if client is not None:
+            client.deliver(chunk)
+        else:
+            logging.info(
+                "Received unregistered publish topic({0}) from mqtt server, packet will be ignored.".format(
+                    publish_packet.topic_name))
 
     @asyncio.coroutine
     def handle_pingresp(self, pingresp: PingRespPacket):
@@ -373,12 +374,12 @@ class RelayServerProtocol(asyncio.Protocol):
 
         self._manual_close = False
 
-        self._topic = next(f_topic_generator)
-        topic_to_clients[self._topic] = self
+        self._connection_id = next(f_topic_generator)   # Topic as connection id
+        topic_to_clients[self._connection_id] = self
 
         self._encryptor = cryptor.Cryptor(config['password'], config['method'])
 
-        self._chunk_cache = ChunkCache()
+        self._chunk_processor = ChunkProcessor()
 
     def connection_made(self, transport):
         self._peername = transport.get_extra_info('peername')
@@ -390,15 +391,15 @@ class RelayServerProtocol(asyncio.Protocol):
             logging.warning("No available client connections, closing relay target")
             self.close()
 
-        logging.info("Client({}) connected from: {}.".format(self._topic, self._peername))
+        logging.info("Client({}) connected from: {}.".format(self._connection_id, self._peername))
 
     def connection_lost(self, exc):
-        logging.info("Client({}) connection{} lost.".format(self._topic, self._peername))
+        logging.info("Client({}) connection{} lost.".format(self._connection_id, self._peername))
         if not self._manual_close:
             # Tell the mqtt server close relay target connection ASAP
-            self._mqtt_client.write_eof(self._topic)
+            self._mqtt_client.write_eof(self._connection_id)
         self._transport = None
-        topic_to_clients.pop(self._topic, None)
+        topic_to_clients.pop(self._connection_id, None)
         self._timeout_handle.cancel()
         self._timeout_handle = None
 
@@ -417,21 +418,22 @@ class RelayServerProtocol(asyncio.Protocol):
             addrtype, remote_addr, remote_port, _ = header_result
             self._stage = STAGE_STREAM
 
-        self._mqtt_client.write(data, self._topic)
+        self._mqtt_client.write(data, self._connection_id)
 
-    # handle remote read
+    def write(self, data: bytes):
+        data = self._encryptor.encrypt(data)
+        self._transport.write(data)
+        self._last_activity = self._loop.time()
+
+    # Delivered from mqtt client
     def deliver(self, chunk: DataChunk):
-        if not self._chunk_cache.store(chunk):
-            logging.warning("chunks reached maximum limit, closing")
-            self.close()
-            return
-
-        out = self._chunk_cache.dump()
-        if len(out) > 0:
-            data = self._encryptor.encrypt(bytes(out))
-            self._transport.write(data)
-
-            self._last_activity = self._loop.time()
+        self._chunk_processor.store(chunk)
+        ordered_chunks = self._chunk_processor.dump_ordered()
+        for ordered_chunk in ordered_chunks:
+            if ordered_chunk.type == ChunkType.Data:
+                self.write(ordered_chunk.data)
+            elif ordered_chunk.type == ChunkType.Disconnect:
+                self.close()
 
     def close(self):
         self._manual_close = True
@@ -441,7 +443,7 @@ class RelayServerProtocol(asyncio.Protocol):
     def timeout_handler(self):
         after = self._last_activity - self._loop.time() + self._timeout
         if after < 0:
-            logging.info("Client({0}) connection{1} timeout.".format(self._topic, self._peername))
+            logging.info("Client({0}) connection{1} timeout.".format(self._connection_id, self._peername))
             self.close()
         else:
             self._timeout_handle = self._loop.call_later(after, self.timeout_handler)
