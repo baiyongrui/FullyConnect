@@ -1,18 +1,21 @@
-from enum import Enum
+from enum import IntEnum
+from struct import pack, unpack
 
 MAX_CHUNK_ID = 65535
+CHUNK_HEADER_LENGTH = 5
 
 
-class ChunkType(Enum):
+class ChunkType(IntEnum):
     Data = 0,
-    Disconnect = 1
+    Connect = 1
+    Disconnect = 2
 
 
 class DataChunk:
-    def __init__(self, type: ChunkType, chunk_id: int, connection_id: str, data: bytes):
-        self._type = type
-        self._id = chunk_id
-        self._connection_id = connection_id
+    def __init__(self, type: ChunkType, chunk_id: int, connection_id: int, data: bytes = None):
+        self._type = type                       # 1 byte
+        self._id = chunk_id                     # 4 byte
+        self._connection_id = connection_id     # 4 byte
         self._data = data
 
     @property
@@ -31,49 +34,59 @@ class DataChunk:
     def data(self):
         return self._data
 
+    @data.setter
+    def data(self, data: bytes):
+        self._data = data
+
+    def to_bytes(self):
+        out = bytearray()
+
+        # type
+        out.extend(pack("!B", self._type.value))
+        # id
+        out.extend(pack("!H", self._id))
+        # connection id
+        out.extend(pack("!H", self._connection_id))
+        # data
+        if self._data is not None:
+            out.extend(self._data)
+
+        return out
+
     @staticmethod
-    def build_data_chunk(chunk_id: int, connection_id: str, data: bytes):
+    def build_data_chunk(chunk_id: int, connection_id: int, data: bytes):
         return DataChunk(ChunkType.Data, chunk_id, connection_id, data)
 
     @staticmethod
-    def build_disconnect_chunk(chunk_id: int, connection_id: str):
+    def build_connect_chunk(chunk_id: int, connection_id: int, data: bytes):
+        return DataChunk(ChunkType.Connect, chunk_id, connection_id, data)
+
+    @staticmethod
+    def build_disconnect_chunk(chunk_id: int, connection_id: int):
         return DataChunk(ChunkType.Disconnect, chunk_id, connection_id, None)
 
+    @staticmethod
+    def from_bytes(buf: bytearray):
+        chunk = None
+        if len(buf) >= CHUNK_HEADER_LENGTH:
+            type, id, connection_id = unpack("!BHH", buf[:CHUNK_HEADER_LENGTH])
+            if type == ChunkType.Data:
+                data = bytes(buf[CHUNK_HEADER_LENGTH:])
+                chunk = DataChunk.build_data_chunk(id, connection_id, data)
+            elif type == ChunkType.Connect:
+                data = bytes(buf[CHUNK_HEADER_LENGTH:])
+                chunk = DataChunk.build_connect_chunk(id, connection_id, data)
+            elif type == ChunkType.Disconnect:
+                chunk = DataChunk.build_disconnect_chunk(id, connection_id)
 
-class ChunkGenerator:
-    def __init__(self):
-        self._chunk_id = 0
-
-    def _inc(self):
-        self._chunk_id += 1
-        if self._chunk_id >= MAX_CHUNK_ID:
-            self._chunk_id = 0
-
-    def fragment(self, connection_id: str, data: bytes, parts=2):
-        chunks = []
-        chunk_size = len(data)
-        if chunk_size > parts:
-            chunk_size = len(data) // parts
-
-        while len(data) > 0:
-            chunk = DataChunk.build_data_chunk(self._chunk_id, connection_id, data[:chunk_size])
-            data = data[chunk_size:]
-            chunks.append(chunk)
-
-            self._inc()
-
-        return chunks
-
-    def get_chunk_id(self):
-        ret = self._chunk_id
-        self._inc()
-        return ret
+        return chunk
 
 
 class ChunkProcessor:
     def __init__(self):
         self._chunks = {}
-        self._cur_chunk_id = 0
+        self._cur_recv_id = 0
+        self._cur_send_id = 0
 
     def store(self, chunk: DataChunk):
         self._chunks[chunk.id] = chunk
@@ -81,17 +94,50 @@ class ChunkProcessor:
     def dump_ordered(self):
         out = []
         while True:
-            chunk = self._chunks.get(self._cur_chunk_id, None)
+            chunk = self._chunks.get(self._cur_recv_id, None)
             if chunk is not None:
                 out.append(chunk)
                 self._chunks.pop(chunk.id)
-                self._cur_chunk_id += 1
-                if self._cur_chunk_id >= MAX_CHUNK_ID:
-                    self._cur_chunk_id = 0
+                self._cur_recv_id += 1
+                if self._cur_recv_id >= MAX_CHUNK_ID:
+                    self._cur_recv_id = 0
             else:
                 break
         return out
 
+    def pack_data(self, connection_id: int, data: bytes, parts=1):
+        data_chunks = []
+        chunk_size = len(data)
+        if chunk_size > parts:
+            chunk_size = len(data) // parts
+
+        while len(data) > 0:
+            chunk = DataChunk.build_data_chunk(self._cur_send_id, connection_id, data[:chunk_size])
+            data = data[chunk_size:]
+            data_chunks.append(chunk)
+
+            self._cur_send_id += 1
+            if self._cur_send_id >= MAX_CHUNK_ID:
+                self._cur_send_id = 0
+
+        return data_chunks
+
+    def pack_connect(self, connection_id: int, data: bytes):
+        connect_chunk = DataChunk.build_connect_chunk(self._cur_send_id, connection_id, data)
+        self._cur_send_id += 1
+        if self._cur_send_id >= MAX_CHUNK_ID:
+            self._cur_send_id = 0
+
+        return connect_chunk
+
+    def pack_disconnect(self, connection_id: int):
+        disconnect_chunk = DataChunk.build_disconnect_chunk(self._cur_send_id, connection_id)
+        self._cur_send_id += 1
+        if self._cur_send_id >= MAX_CHUNK_ID:
+            self._cur_send_id = 0
+
+        return disconnect_chunk
+
     def reset(self):
         self._chunks.clear()
-        self._cur_chunk_id = 0
+        self._cur_recv_id = 0

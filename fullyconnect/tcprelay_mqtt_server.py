@@ -1,11 +1,11 @@
 import collections
 import asyncio
-from asyncio import StreamReader, StreamWriter
-from asyncio import ensure_future, Queue
+from asyncio import StreamReader, StreamWriter, ensure_future
+from asyncio.streams import FlowControlMixin
 import logging
 
 from fullyconnect import cryptor, common
-from fullyconnect.adapters import StreamReaderAdapter, FlowControlMixin
+from fullyconnect.adapters import StreamReaderAdapter
 from fullyconnect.mqtt import packet_class
 from fullyconnect.errors import MQTTException, NoDataException
 from fullyconnect.mqtt.packet import (
@@ -18,7 +18,7 @@ from fullyconnect.mqtt.connect import ConnectPacket, ConnectPayload, ConnectVari
 from fullyconnect.mqtt.connack import ConnackPacket, ConnackVariableHeader
 from fullyconnect.mqtt.pingresp import PingRespPacket
 from fullyconnect.ConnectionGroup import ConnectionGroup
-from fullyconnect.DataChunk import DataChunk, ChunkType, ChunkGenerator
+from fullyconnect.DataChunk import DataChunk, ChunkType, ChunkProcessor
 
 logging.basicConfig(level=logging.DEBUG,
                     format='%(asctime)s %(levelname)-8s %(message)s',
@@ -60,7 +60,6 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         self._peername = None
 
         self._reader_task = None
-        self._data_task = None
         self._keepalive_task = None
         self._keepalive_timeout = config['timeout']
         self._reader_ready = None
@@ -69,8 +68,6 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         self._stream_writer = None
         self._reader = None
         self._approved = False
-
-        self._queue = Queue(loop=loop)
 
     def connection_made(self, transport):
         self._peername = transport.get_extra_info('peername')
@@ -106,14 +103,6 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         self._stream_reader.feed_eof()
 
     @asyncio.coroutine
-    def consume(self):
-        while self._transport is not None:
-            packet = yield from self._queue.get()
-            if self._transport is None or packet is None:
-                break
-            yield from self._send_packet(packet)
-
-    @asyncio.coroutine
     def start(self):
         self._reader_ready = asyncio.Event(loop=self._loop)
         self._reader_task = asyncio.Task(self._reader_loop(), loop=self._loop)
@@ -121,13 +110,10 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         if self._keepalive_timeout:
             self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
 
-        self._data_task = self._loop.create_task(self.consume())
-
     @asyncio.coroutine
     def stop(self):
         if self._keepalive_task:
             self._keepalive_task.cancel()
-        self._data_task.cancel()
         logger.debug("waiting for tasks to be stopped")
         if not self._reader_task.done():
             if not self._reader_stopped.is_set():
@@ -211,30 +197,22 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         logging.debug("{} Reader coro stopped".format(self._peername))
         yield from self.stop()
 
-    # for target data_received
-    def write(self, chunk: DataChunk):
+    # For relay_data, relay_disconnect
+    async def write(self, chunk: DataChunk):
         if self._transport is None or self._transport.is_closing():
             return
         if chunk.type == ChunkType.Data:
-            data = self._encryptor.encrypt(chunk.data)
-            packet = PublishPacket.build(chunk.connection_id, data, chunk.id, dup_flag=0, qos=2, retain=0)
-            ensure_future(self._do_write(packet), loop=self._loop)
-        elif chunk.type == ChunkType.Disconnect:
-            packet = PublishPacket.build(chunk.connection_id, b'', chunk.id, dup_flag=0, qos=2, retain=1)
-            ensure_future(self._do_write(packet), loop=self._loop)
+            chunk.data = self._encryptor.encrypt(chunk.data)
+        data = chunk.to_bytes()
+        packet = PublishPacket.build("XCH", data, packet_id=None, dup_flag=0, qos=0, retain=0)
 
-    @asyncio.coroutine
-    def _do_write(self, packet):
-        yield from self._queue.put(packet)
-
-    @asyncio.coroutine
-    def _send_packet(self, packet):
-        yield from packet.to_stream(self._stream_writer)
+        await packet.to_stream(self._stream_writer)
         self._keepalive_task.cancel()
         self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
 
     def handle_write_timeout(self):
         packet = PingReqPacket()
+        # TODO: Use async semantic
         self._transport.write(packet.to_bytes())
         self._keepalive_task.cancel()
         self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
@@ -242,8 +220,7 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
     def handle_read_timeout(self):
         self._loop.create_task(self.stop())
 
-    @asyncio.coroutine
-    def handle_connect(self, connect: ConnectPacket):
+    async def handle_connect(self, connect: ConnectPacket):
         return_code = 0
 
         # if self._peername[0] != self._auth_ip:
@@ -252,13 +229,12 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
 
         connack_vh = ConnackVariableHeader(return_code=return_code)
         connack = ConnackPacket(variable_header=connack_vh)
-        yield from self._do_write(connack)
+        await connack.to_stream(self._stream_writer)
 
         if return_code != 0:
             self._loop.create_task(self.stop())
 
-    @asyncio.coroutine
-    def handle_publish(self, publish_packet: PublishPacket):
+    async def handle_publish(self, publish_packet: PublishPacket):
         if not self._approved:
             if publish_packet.topic_name == "auth":
                 password = self._encryptor.decrypt(bytes(publish_packet.data)).decode('utf-8')
@@ -267,74 +243,46 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
                     packet = PublishPacket.build("auth",
                                                  self._encryptor.encrypt(self._encryptor.password.encode('utf-8')),
                                                  None, dup_flag=0, qos=0, retain=0)
-                    yield from self._do_write(packet)
+                    await packet.to_stream(self._stream_writer)
                 else:
                     self._loop.create_task(self.stop())
             else:
                 self._loop.create_task(self.stop())
             return
 
-        data = bytes(publish_packet.data)
-        target = topic_to_target.get(publish_packet.topic_name, None)
-        if not publish_packet.retain_flag:
-            data = self._encryptor.decrypt(data)
-            if target is None:    # we are in STAGE_ADDR
-                target = RelayTargetProtocol(self._loop, publish_packet.topic_name)
-
-                if not data:
-                    target.send_disconnect()
+        chunk = DataChunk.from_bytes(publish_packet.data)
+        if chunk is not None:
+            target = topic_to_target.get(chunk.connection_id, None)
+            if target is None:
+                target = RelayTargetProtocol(self._loop, chunk.connection_id)
+                topic_to_target[chunk.connection_id] = target
+            if chunk.type == ChunkType.Data or chunk.type == ChunkType.Connect:
+                chunk.data = self._encryptor.decrypt(chunk.data)
+                # FIXME ??
+                if not chunk.data:
                     return
 
-                header_result = common.parse_header(data)
-                if header_result is None:
-                    logging.error("Can not parse header when handling mqtt client({}) connection{}.".format(
-                        publish_packet.topic_name, self._peername))
-                    target.send_disconnect()
-                    return
-
-                addrtype, remote_addr, remote_port, header_length = header_result
-                logging.info("Connecting to remote {}:{} from mqtt client({}) connection{}.".format(
-                    common.to_str(remote_addr), remote_port, publish_packet.topic_name, self._peername))
-
-                topic_to_target[publish_packet.topic_name] = target
-                self._loop.create_task(self.create_connection(target, common.to_str(remote_addr), remote_port))
-
-                if len(data) > header_length:
-                    target.write(data[header_length:])
-            else:   # now in STAGE_STREAM
-                target.write(data)
+            target.deliver(chunk)
         else:
-            if target is not None:
-                target.close(force=True)
+            logging.warning("Invalid chunk, packet will be ignored.")
 
-    @asyncio.coroutine
-    def handle_pingresp(self, pingresp: PingRespPacket):
+    async def handle_pingresp(self, pingresp: PingRespPacket):
         logging.info("Received PingRespPacket from mqtt client.")
 
-    @asyncio.coroutine
-    def handle_pingreq(self, pingreq: PingReqPacket):
+    async def handle_pingreq(self, pingreq: PingReqPacket):
         logging.info("Received PingRepPacket from mqtt client, replying PingRespPacket.")
         ping_resp = PingRespPacket()
-        yield from self._do_write(ping_resp)
-
-    async def create_connection(self, target, host, port):
-        try:
-            #TODO handle pending task
-            transport, protocol = await self._loop.create_connection(lambda: target, host, port)
-        except OSError as e:
-            logging.error("{} when creating remote connection to {}:{} from mqtt connection{}.".format(e, host, port, self._peername))
-            target.send_disconnect()
-            topic_to_target.pop(target.client_topic, None)
+        await ping_resp.to_stream(self._stream_writer)
 
 
 class RelayTargetProtocol(asyncio.Protocol):
 
-    def __init__(self, loop, client_topic):
+    def __init__(self, loop, connection_id):
         self._loop = loop
         self._transport = None
         self._write_pending_data = []
         self._connected = False
-        self.client_topic = client_topic
+        self._connection_id = connection_id
 
         self._peername = None
 
@@ -343,12 +291,16 @@ class RelayTargetProtocol(asyncio.Protocol):
         self._timeout = 60
         self._timeout_handle = None
 
-        self._chunk_generator = ChunkGenerator()
+        self._chunk_processor = ChunkProcessor()
+
+        self._idle_task = self._loop.call_later(20, self.remove)
 
     def connection_made(self, transport):
         self._peername = transport.get_extra_info('peername')
         self._transport = transport
-        self._connected = True
+
+        self._idle_task.cancel()
+        self._idle_task = None
 
         if len(connections) == 0:
             self._transport.close()
@@ -358,16 +310,17 @@ class RelayTargetProtocol(asyncio.Protocol):
             data = b''.join(self._write_pending_data)
             self._write_pending_data = []
             self._transport.write(data)
+        self._connected = True
 
         self._last_activity = self._loop.time()
         self._timeout_handle = self._loop.call_later(self._timeout, self.timeout_handler)
 
     def connection_lost(self, exc):
-        logging.info("Remote connection{}_{} lost.".format(self._peername, self.client_topic))
+        logging.info("Target connection {}{} lost.".format(self._connection_id, self._peername))
         self._transport = None
 
-        self.send_disconnect()
-        topic_to_target.pop(self.client_topic, None)
+        ensure_future(self.relay_disconnect(), loop=self._loop)
+        self._idle_task = self._loop.call_later(5, self.remove)
 
         self._timeout_handle.cancel()
         self._timeout_handle = None
@@ -375,26 +328,55 @@ class RelayTargetProtocol(asyncio.Protocol):
     def data_received(self, data):
         if not self._connected:
             return
-        self.send_data(data)
+        self._transport.pause_reading()
+        task = ensure_future(self.relay_data(data), loop=self._loop)
+
+        def maybe_resume_reading(_):
+            if self._transport is not None:
+                self._transport.resume_reading()
+        task.add_done_callback(maybe_resume_reading)
+
         self._last_activity = self._loop.time()
 
-    def send_data(self, data: bytes):
-        chunks = self._chunk_generator.fragment(self.client_topic, data)
+    async def relay_data(self, data: bytes):
+        chunks = self._chunk_processor.pack_data(self._connection_id, data)
         for chunk in chunks:
             mqtt_carrier = connections.pick_connection()
             if mqtt_carrier is None:
                 logging.warning("No mqtt carrier available, closing relay target")
                 self.close()
                 return
-            mqtt_carrier.write(chunk)
+            await mqtt_carrier.write(chunk)
 
-    def send_disconnect(self):
-        chunk = DataChunk.build_disconnect_chunk(self._chunk_generator.get_chunk_id(), self.client_topic)
+    async def relay_disconnect(self):
+        chunk = self._chunk_processor.pack_disconnect(self._connection_id)
         mqtt_carrier = connections.pick_connection()
         if mqtt_carrier is not None:
-            mqtt_carrier.write(chunk)
+            await mqtt_carrier.write(chunk)
 
-    def write(self, data):
+    # Delivered from mqtt server
+    def deliver(self, chunk: DataChunk):
+        self._chunk_processor.store(chunk)
+        ordered_chunks = self._chunk_processor.dump_ordered()
+        for ordered_chunk in ordered_chunks:
+            if ordered_chunk.type == ChunkType.Data:
+                self.write(ordered_chunk.data)
+            elif ordered_chunk.type == ChunkType.Connect:
+                data = ordered_chunk.data
+                header_result = common.parse_header(data)
+                if header_result is None:
+                    logging.warning("Target connection {} can not parse header".format(self._connection_id))
+                    return
+                addrtype, remote_addr, remote_port, header_length = header_result
+                logging.info("Target connection {} creating connection to {}:{}.".format(self._connection_id, common.to_str(remote_addr), remote_port))
+                self._loop.create_task(self.create_connection(common.to_str(remote_addr), remote_port))
+
+                if len(data) > header_length:
+                    self.write(data[header_length:])
+            elif ordered_chunk.type == ChunkType.Disconnect:
+                self.close(force=True)
+
+    def write(self, data: bytes):
         if not self._connected:
             self._write_pending_data.append(data)
         else:
@@ -411,10 +393,21 @@ class RelayTargetProtocol(asyncio.Protocol):
     def timeout_handler(self):
         after = self._last_activity - self._loop.time() + self._timeout
         if after < 0:
-            logging.info("Remote connection{} timeout".format(self._peername))
+            logging.info("Target connection {}{} timeout".format(self._connection_id, self._peername))
             self.close()
         else:
             self._timeout_handle = self._loop.call_later(after, self.timeout_handler)
+
+    async def create_connection(self, host, port):
+        try:
+            #TODO handle pending task
+            transport, protocol = await self._loop.create_connection(lambda: self, host, port)
+        except OSError as e:
+            logging.error("{} when creating target connection {} to {}:{}.".format(e, self._connection_id, host, port))
+            ensure_future(self.relay_disconnect(), loop=self._loop)
+
+    def remove(self):
+        topic_to_target.pop(self._connection_id, None)
 
 
 if __name__ == "__main__":
