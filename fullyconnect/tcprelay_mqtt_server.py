@@ -1,6 +1,6 @@
 import collections
 import asyncio
-from asyncio import StreamReader, StreamWriter, ensure_future
+from asyncio import StreamReader, StreamWriter, ensure_future, Queue
 from asyncio.streams import FlowControlMixin
 import logging
 
@@ -69,6 +69,9 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         self._reader = None
         self._approved = False
 
+        self._write_task = None
+        self._queue = Queue(maxsize=1024, loop=self._loop)
+
     def connection_made(self, transport):
         self._peername = transport.get_extra_info('peername')
         self._transport = transport
@@ -109,11 +112,14 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         yield from self._reader_ready.wait()
         if self._keepalive_timeout:
             self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
+        
+        self._write_task = self._loop.create_task(self._consume_write())
 
     @asyncio.coroutine
     def stop(self):
         if self._keepalive_task:
             self._keepalive_task.cancel()
+        self._write_task.cancel()
         logger.debug("waiting for tasks to be stopped")
         if not self._reader_task.done():
             if not self._reader_stopped.is_set():
@@ -197,6 +203,19 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         logging.debug("{} Reader coro stopped".format(self._peername))
         yield from self.stop()
 
+    async def _consume_write(self):
+        while self._transport is not None:
+            packet = await self._queue.get()
+            if self._transport is None or packet is None:
+                break
+            await self._send_packet(packet)
+            
+    async def _send_packet(self, packet):
+        # TODO Add try?
+        await packet.to_stream(self._stream_writer)
+        self._keepalive_task.cancel()
+        self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
+
     # For relay_data, relay_disconnect
     async def write(self, chunk: DataChunk):
         if self._transport is None or self._transport.is_closing():
@@ -206,9 +225,7 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         data = chunk.to_bytes()
         packet = PublishPacket.build("XCH", data, packet_id=None, dup_flag=0, qos=0, retain=0)
 
-        await packet.to_stream(self._stream_writer)
-        self._keepalive_task.cancel()
-        self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
+        await self._queue.put(packet)
 
     def handle_write_timeout(self):
         packet = PingReqPacket()
