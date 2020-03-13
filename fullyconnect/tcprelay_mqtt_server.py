@@ -220,7 +220,7 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
     async def write(self, chunk: DataChunk):
         if self._transport is None or self._transport.is_closing():
             return
-        if chunk.type == ChunkType.Data:
+        if chunk.type == ChunkType.DATA:
             chunk.data = self._encryptor.encrypt(chunk.data)
         data = chunk.to_bytes()
         packet = PublishPacket.build("XCH", data, packet_id=None, dup_flag=0, qos=0, retain=0)
@@ -273,7 +273,8 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
             if target is None:
                 target = RelayTargetProtocol(self._loop, chunk.connection_id)
                 topic_to_target[chunk.connection_id] = target
-            if chunk.type == ChunkType.Data or chunk.type == ChunkType.Connect:
+            # TODO chunk.data is not None?
+            if chunk.type == ChunkType.DATA or chunk.type == ChunkType.CONNECT:
                 chunk.data = self._encryptor.decrypt(chunk.data)
                 # FIXME ??
                 if not chunk.data:
@@ -311,6 +312,8 @@ class RelayTargetProtocol(asyncio.Protocol):
         self._chunk_processor = ChunkProcessor()
 
         self._idle_task = self._loop.call_later(20, self.remove)
+
+        self._force_pause_reading = False
 
     def connection_made(self, transport):
         self._peername = transport.get_extra_info('peername')
@@ -351,7 +354,9 @@ class RelayTargetProtocol(asyncio.Protocol):
         def maybe_resume_reading(_):
             if self._transport is not None:
                 self._transport.resume_reading()
-        task.add_done_callback(maybe_resume_reading)
+        
+        if not self._force_pause_reading:
+            task.add_done_callback(maybe_resume_reading)
 
         self._last_activity = self._loop.time()
 
@@ -376,9 +381,9 @@ class RelayTargetProtocol(asyncio.Protocol):
         self._chunk_processor.store(chunk)
         ordered_chunks = self._chunk_processor.dump_ordered()
         for ordered_chunk in ordered_chunks:
-            if ordered_chunk.type == ChunkType.Data:
+            if ordered_chunk.type == ChunkType.DATA:
                 self.write(ordered_chunk.data)
-            elif ordered_chunk.type == ChunkType.Connect:
+            elif ordered_chunk.type == ChunkType.CONNECT:
                 data = ordered_chunk.data
                 header_result = common.parse_header(data)
                 if header_result is None:
@@ -390,8 +395,20 @@ class RelayTargetProtocol(asyncio.Protocol):
 
                 if len(data) > header_length:
                     self.write(data[header_length:])
-            elif ordered_chunk.type == ChunkType.Disconnect:
+            elif ordered_chunk.type == ChunkType.DISCONNECT:
                 self.close(force=True)
+            elif ordered_chunk.type == ChunkType.HIGH_WATER_MARK:
+                self._toggle_transport_reading(pause_reading=True)
+            elif ordered_chunk.type == ChunkType.LOW_WATER_MARK:
+                self._toggle_transport_reading(pause_reading=False)
+
+    def _toggle_transport_reading(self, pause_reading: bool):
+        self._force_pause_reading = pause_reading
+        if self._transport is not None:
+            if pause_reading:
+                self._transport.pause_reading()
+            else:
+                self._transport.resume_reading()
 
     def write(self, data: bytes):
         if not self._connected:

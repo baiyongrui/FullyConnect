@@ -264,7 +264,7 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
         if not self._connected:
             self._write_pending_data.append(chunk)
         else:
-            if chunk.type == ChunkType.Data or chunk.type == ChunkType.Connect:
+            if chunk.type == ChunkType.DATA or chunk.type == ChunkType.CONNECT:
                 chunk.data = self._encryptor.encrypt(chunk.data)
             data = chunk.to_bytes()
             packet = PublishPacket.build("XCH", data, packet_id=None, dup_flag=0, qos=0, retain=0)
@@ -316,7 +316,7 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
 
         chunk = DataChunk.from_bytes(publish_packet.data)
         if chunk is not None:
-            if chunk.type == ChunkType.Data:
+            if chunk.type == ChunkType.DATA:
                 chunk.data = self._encryptor.decrypt(chunk.data)
             client = topic_to_clients.get(chunk.connection_id, None)
             if client is not None:
@@ -381,6 +381,12 @@ class RelayServerProtocol(asyncio.Protocol):
         topic_to_clients.pop(self._connection_id, None)
         self._timeout_handle.cancel()
         self._timeout_handle = None
+    
+    def pause_writing(self):
+        ensure_future(self.relay_high_water_mark(), loop=self._loop)
+
+    def resume_writing(self):
+        ensure_future(self.relay_low_water_mark(), loop=self._loop)
 
     def data_received(self, data):
         # self._last_activity = self._loop.time()
@@ -425,6 +431,18 @@ class RelayServerProtocol(asyncio.Protocol):
         if mqtt_carrier is not None:
             await mqtt_carrier.write(chunk)
 
+    async def relay_high_water_mark(self):
+        chunk = self._chunk_processor.pack_hwm(self._connection_id)
+        mqtt_carrier = mqtt_connections.pick_connection()
+        if mqtt_carrier is not None:
+            await mqtt_carrier.write(chunk)
+    
+    async def relay_low_water_mark(self):
+        chunk = self._chunk_processor.pack_lwm(self._connection_id)
+        mqtt_carrier = mqtt_connections.pick_connection()
+        if mqtt_carrier is not None:
+            await mqtt_carrier.write(chunk)
+
     def write(self, data: bytes):
         data = self._encryptor.encrypt(data)
         self._transport.write(data)
@@ -435,9 +453,9 @@ class RelayServerProtocol(asyncio.Protocol):
         self._chunk_processor.store(chunk)
         ordered_chunks = self._chunk_processor.dump_ordered()
         for ordered_chunk in ordered_chunks:
-            if ordered_chunk.type == ChunkType.Data:
+            if ordered_chunk.type == ChunkType.DATA:
                 self.write(ordered_chunk.data)
-            elif ordered_chunk.type == ChunkType.Disconnect:
+            elif ordered_chunk.type == ChunkType.DISCONNECT:
                 self.close()
 
     def close(self):

@@ -6,9 +6,11 @@ CHUNK_HEADER_LENGTH = 5
 
 
 class ChunkType(IntEnum):
-    Data = 0,
-    Connect = 1
-    Disconnect = 2
+    DATA = 0,
+    CONNECT = 1
+    DISCONNECT = 2
+    LOW_WATER_MARK = 3
+    HIGH_WATER_MARK = 4
 
 
 class DataChunk:
@@ -55,29 +57,41 @@ class DataChunk:
 
     @staticmethod
     def build_data_chunk(chunk_id: int, connection_id: int, data: bytes):
-        return DataChunk(ChunkType.Data, chunk_id, connection_id, data)
+        return DataChunk(ChunkType.DATA, chunk_id, connection_id, data)
 
     @staticmethod
     def build_connect_chunk(chunk_id: int, connection_id: int, data: bytes):
-        return DataChunk(ChunkType.Connect, chunk_id, connection_id, data)
+        return DataChunk(ChunkType.CONNECT, chunk_id, connection_id, data)
 
     @staticmethod
     def build_disconnect_chunk(chunk_id: int, connection_id: int):
-        return DataChunk(ChunkType.Disconnect, chunk_id, connection_id, None)
+        return DataChunk(ChunkType.DISCONNECT, chunk_id, connection_id, None)
+
+    @staticmethod
+    def build_lwm_chunk(chunk_id: int, connection_id: int):
+        return DataChunk(ChunkType.LOW_WATER_MARK, chunk_id, connection_id, None)
+
+    @staticmethod
+    def build_hwm_chunk(chunk_id: int, connection_id: int):
+        return DataChunk(ChunkType.HIGH_WATER_MARK, chunk_id, connection_id, None)
 
     @staticmethod
     def from_bytes(buf: bytearray):
         chunk = None
         if len(buf) >= CHUNK_HEADER_LENGTH:
             type, id, connection_id = unpack("!BHH", buf[:CHUNK_HEADER_LENGTH])
-            if type == ChunkType.Data:
+            if type == ChunkType.DATA:
                 data = bytes(buf[CHUNK_HEADER_LENGTH:])
                 chunk = DataChunk.build_data_chunk(id, connection_id, data)
-            elif type == ChunkType.Connect:
+            elif type == ChunkType.CONNECT:
                 data = bytes(buf[CHUNK_HEADER_LENGTH:])
                 chunk = DataChunk.build_connect_chunk(id, connection_id, data)
-            elif type == ChunkType.Disconnect:
+            elif type == ChunkType.DISCONNECT:
                 chunk = DataChunk.build_disconnect_chunk(id, connection_id)
+            elif type == ChunkType.LOW_WATER_MARK:
+                chunk = DataChunk.build_lwm_chunk(id, connection_id)
+            elif type == ChunkType.HIGH_WATER_MARK:
+                chunk = DataChunk.build_hwm_chunk(id, connection_id)
 
         return chunk
 
@@ -137,6 +151,22 @@ class ChunkProcessor:
             self._cur_send_id = 0
 
         return disconnect_chunk
+
+    def pack_lwm(self, connection_id: int):
+        lwm_chunk = DataChunk.build_lwm_chunk(self._cur_send_id, connection_id)
+        self._cur_send_id += 1
+        if self._cur_send_id >= MAX_CHUNK_ID:
+            self._cur_send_id = 0
+
+        return lwm_chunk
+
+    def pack_hwm(self, connection_id: int):
+        hwm_chunk = DataChunk.build_hwm_chunk(self._cur_send_id, connection_id)
+        self._cur_send_id += 1
+        if self._cur_send_id >= MAX_CHUNK_ID:
+            self._cur_send_id = 0
+
+        return hwm_chunk
 
     def reset(self):
         self._chunks.clear()
