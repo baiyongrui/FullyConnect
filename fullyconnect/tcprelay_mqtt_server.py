@@ -208,13 +208,18 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
             packet = await self._queue.get()
             if self._transport is None or packet is None:
                 break
-            await self._send_packet(packet)
+            if not await self._send_packet(packet):
+                break
             
     async def _send_packet(self, packet):
-        # TODO Add try?
-        await packet.to_stream(self._stream_writer)
-        self._keepalive_task.cancel()
-        self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
+        try:
+            await packet.to_stream(self._stream_writer)
+            self._keepalive_task.cancel()
+            self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
+
+            return True
+        except ConnectionResetError:
+            return False
 
     # For relay_data, relay_disconnect
     async def write(self, chunk: DataChunk):
