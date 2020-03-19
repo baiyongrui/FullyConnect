@@ -155,7 +155,7 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
         connect_vh = ConnectVariableHeader(keep_alive=self._keepalive_timeout)
         connect_payload = ConnectPayload(client_id=ConnectPayload.gen_client_id())
         connect_packet = ConnectPacket(vh=connect_vh, payload=connect_payload)
-        await connect_packet.to_stream(self._stream_writer)
+        await self._queue.put(connect_packet)
 
         logging.info("Creating connection to mqtt server.")
 
@@ -278,8 +278,8 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
 
     def handle_write_timeout(self):
         packet = PingReqPacket()
-        # TODO: Use async semantic
-        self._transport.write(packet.to_bytes())
+
+        ensure_future(self._queue.put(packet), loop=self._loop)
         self._keepalive_task.cancel()
         self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
 
@@ -291,7 +291,7 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
             packet = PublishPacket.build("auth",
                                          self._encryptor.encrypt(self._encryptor.password.encode('utf-8')),
                                          None, dup_flag=0, qos=0, retain=0)
-            await packet.to_stream(self._stream_writer)
+            await self._queue.put(packet)
         else:
             logging.info("Unable to create connection to mqtt server! Shutting down...")
             self._loop.create_task(self.stop())
@@ -338,8 +338,8 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
 
     async def handle_pingreq(self, pingreq: PingReqPacket):
         logging.info("Received PingReqPacket from mqtt server, Replying PingResqPacket.")
-        ping_resp = PingRespPacket()
-        await ping_resp.to_stream(self._stream_writer)
+        packet = PingRespPacket()
+        await self._queue.put(packet)
 
 
 class RelayServerProtocol(asyncio.Protocol):

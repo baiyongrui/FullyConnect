@@ -234,8 +234,8 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
 
     def handle_write_timeout(self):
         packet = PingReqPacket()
-        # TODO: Use async semantic
-        self._transport.write(packet.to_bytes())
+
+        ensure_future(self._queue.put(packet), loop=self._loop)
         self._keepalive_task.cancel()
         self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
 
@@ -251,7 +251,7 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
 
         connack_vh = ConnackVariableHeader(return_code=return_code)
         connack = ConnackPacket(variable_header=connack_vh)
-        await connack.to_stream(self._stream_writer)
+        await self._queue.put(connack)
 
         if return_code != 0:
             self._loop.create_task(self.stop())
@@ -265,7 +265,7 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
                     packet = PublishPacket.build("auth",
                                                  self._encryptor.encrypt(self._encryptor.password.encode('utf-8')),
                                                  None, dup_flag=0, qos=0, retain=0)
-                    await packet.to_stream(self._stream_writer)
+                    await self._queue.put(packet)
                 else:
                     self._loop.create_task(self.stop())
             else:
@@ -294,8 +294,9 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
 
     async def handle_pingreq(self, pingreq: PingReqPacket):
         logging.info("Received PingRepPacket from mqtt client, replying PingRespPacket.")
-        ping_resp = PingRespPacket()
-        await ping_resp.to_stream(self._stream_writer)
+
+        packet = PingRespPacket()
+        await self._queue.put(packet)
 
 
 class RelayTargetProtocol(asyncio.Protocol):
