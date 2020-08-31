@@ -84,12 +84,14 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         self._stream_writer = StreamWriter(transport, self,
                                            self._stream_reader,
                                            self._loop)
-        self._loop.create_task(self.start())
+        ensure_future(self.start(), loop=self._loop)
 
     def connection_lost(self, exc):
+        super().connection_lost(exc)
+
+        self._transport = None
         connections.remove_connection(self)
         logging.info("Mqtt client connection{} lost.".format(self._peername))
-        super().connection_lost(exc)
 
         if self._stream_reader is not None:
             if exc is None:
@@ -97,7 +99,7 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
             else:
                 self._stream_reader.set_exception(exc)
 
-        self.stop()
+        ensure_future(self.stop(), loop=self._loop)
 
     def data_received(self, data):
         self._stream_reader.feed_data(data)
@@ -115,25 +117,22 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         
         self._write_task = self._loop.create_task(self._consume_write())
 
-    @asyncio.coroutine
-    def stop(self):
+    async def stop(self):
+        if self._transport:
+            self._transport.close()
+
         if self._keepalive_task:
             self._keepalive_task.cancel()
         self._write_task.cancel()
-        logger.debug("waiting for tasks to be stopped")
         if not self._reader_task.done():
             if not self._reader_stopped.is_set():
                 self._reader_task.cancel()  # this will cause the reader_loop handle CancelledError
-                # yield from asyncio.wait(
-                #     [self._reader_stopped.wait()], loop=self._loop)
-            else:   # caused by reader_loop break statement
-                if self._transport:
-                    self._transport.close()
-                    self._transport = None
+                await asyncio.wait(
+                    [self._reader_stopped.wait()], loop=self._loop)
 
-                    # TODO close remote in topic_to_target
-                    # for topic, remote in self._topic_to_target.items():
-                    #     remote.close()
+        # TODO close remote in topic_to_target
+        # for topic, remote in self._topic_to_target.items():
+        #     remote.close()
 
     @asyncio.coroutine
     def _reader_loop(self):
@@ -201,7 +200,7 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
             running_tasks.popleft().cancel()
         self._reader_stopped.set()
         logging.debug("{} Reader coro stopped".format(self._peername))
-        yield from self.stop()
+        ensure_future(self.stop(), loop=self._loop)
 
     async def _consume_write(self):
         while self._transport is not None:
@@ -240,7 +239,7 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
 
     def handle_read_timeout(self):
-        self._loop.create_task(self.stop())
+        ensure_future(self.stop(), loop=self._loop)
 
     async def handle_connect(self, connect: ConnectPacket):
         return_code = 0
@@ -254,7 +253,7 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         await self._queue.put(connack)
 
         if return_code != 0:
-            self._loop.create_task(self.stop())
+            await self.stop()
 
     async def handle_publish(self, publish_packet: PublishPacket):
         if not self._approved:
@@ -267,9 +266,9 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
                                                  None, dup_flag=0, qos=0, retain=0)
                     await self._queue.put(packet)
                 else:
-                    self._loop.create_task(self.stop())
+                    await self.stop()
             else:
-                self._loop.create_task(self.stop())
+                await self.stop()
             return
 
         chunk = DataChunk.from_bytes(publish_packet.data)
@@ -397,7 +396,7 @@ class RelayTargetProtocol(asyncio.Protocol):
                     return
                 addrtype, remote_addr, remote_port, header_length = header_result
                 logging.info("Target connection {} creating connection to {}:{}.".format(self._connection_id, common.to_str(remote_addr), remote_port))
-                self._loop.create_task(self.create_connection(common.to_str(remote_addr), remote_port))
+                ensure_future(self.create_connection(common.to_str(remote_addr), remote_port), loop=self._loop)
 
                 if len(data) > header_length:
                     self.write(data[header_length:])

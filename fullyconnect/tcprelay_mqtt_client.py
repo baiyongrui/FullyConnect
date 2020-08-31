@@ -117,6 +117,8 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
         ensure_future(self.start(), loop=self._loop)
 
     def connection_lost(self, exc):
+        super().connection_lost(exc)
+
         self._transport = None
         mqtt_connections.remove_connection(self)
         logging.info("Lost connection with mqtt server{0}".format(self._peername))
@@ -239,7 +241,7 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
             running_tasks.popleft().cancel()
         self._reader_stopped.set()
         logging.debug("{} Reader coro stopped".format(self._peername))
-        await self.stop()
+        ensure_future(self.stop(), loop=self._loop)
 
     async def _consume_write(self):
         while self._transport is not None:
