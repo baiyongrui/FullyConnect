@@ -53,7 +53,7 @@ class TCPRelayServer:
 
         for client_config in self._config['mqtt_client']:
             mqtt_client = MQTTClientProtocol(loop, client_config)
-            self._loop.create_task(mqtt_client.create_connection())
+            ensure_future(mqtt_client.create_connection(), loop=self._loop)
 
         coro = loop.create_server(lambda: RelayServerProtocol(self._loop, self._config['server']),
                                   '0.0.0.0', self._config['server']['port'])
@@ -102,7 +102,7 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
             logging.error("{0} when connecting to mqtt server({1}:{2})".format(e, self._config['address'], self._config['port']))
             logging.error("Reconnection will be performed after 5s...")
             await asyncio.sleep(5)     # TODO:retry interval
-            self._loop.create_task(self.create_connection())
+            ensure_future(self.create_connection(), loop=self._loop)
 
     def connection_made(self, transport):
         self._peername = transport.get_extra_info('peername')
@@ -114,12 +114,12 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
         self._stream_writer = StreamWriter(transport, self,
                                            self._stream_reader,
                                            self._loop)
-        self._loop.create_task(self.start())
+        ensure_future(self.start(), loop=self._loop)
 
     def connection_lost(self, exc):
+        self._transport = None
         mqtt_connections.remove_connection(self)
         logging.info("Lost connection with mqtt server{0}".format(self._peername))
-        super().connection_lost(exc)
 
         if self._stream_reader is not None:
             if exc is None:
@@ -127,11 +127,10 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
             else:
                 self._stream_reader.set_exception(exc)
 
-        self.stop()
+        ensure_future(self.stop_and_reconnect(), loop=self._loop)
 
-        self.reestablish_connection()
-
-    def reestablish_connection(self):
+    async def stop_and_reconnect(self):
+        await self.stop()
         self._stream_reader = StreamReader(loop=self._loop)
         self._encryptor = cryptor.Cryptor(self._config['password'], self._config['method'])
         self._loop.call_later(5, lambda: self._loop.create_task(self.create_connection()))
@@ -159,22 +158,20 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
 
         logging.info("Creating connection to mqtt server.")
 
-    @asyncio.coroutine
-    def stop(self):
+    async def stop(self):
         self._connected = False
+
+        if self._transport:
+            self._transport.close()
+
         if self._keepalive_task:
             self._keepalive_task.cancel()
         self._write_task.cancel()
-        logger.debug("waiting for tasks to be stopped")
         if not self._reader_task.done():
             if not self._reader_stopped.is_set():
                 self._reader_task.cancel()  # this will cause the reader_loop handle CancelledError
-                # yield from asyncio.wait(
-                #     [self._reader_stopped.wait()], loop=self._loop)
-            else:   # caused by reader_loop break statement
-                if self._transport:
-                    self._transport.close()
-                    self._transport = None
+                await asyncio.wait(
+                    [self._reader_stopped.wait()], loop=self._loop)
 
     @asyncio.coroutine
     def _reader_loop(self):
@@ -242,7 +239,7 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
             running_tasks.popleft().cancel()
         self._reader_stopped.set()
         logging.debug("{} Reader coro stopped".format(self._peername))
-        yield from self.stop()
+        await self.stop()
 
     async def _consume_write(self):
         while self._transport is not None:
@@ -284,7 +281,7 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
         self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
 
     def handle_read_timeout(self):
-        self._loop.create_task(self.stop())
+        ensure_future(self.stop(), loop=self._loop)
 
     async def handle_connack(self, connack: ConnackPacket):
         if connack.variable_header.return_code == 0:
@@ -294,7 +291,7 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
             await self._queue.put(packet)
         else:
             logging.info("Unable to create connection to mqtt server! Shutting down...")
-            self._loop.create_task(self.stop())
+            await self.stop()
 
     async def handle_publish(self, publish_packet: PublishPacket):
         data = bytes(publish_packet.data)
@@ -314,9 +311,9 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
                         self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
                 else:
                     logging.info("Connection authorization failed! Shuting down...")
-                    self._loop.create_task(self.stop())
+                    await self.stop()
             else:
-                self._loop.create_task(self.stop())
+                await self.stop()
             return
 
         chunk = DataChunk.from_bytes(publish_packet.data)
