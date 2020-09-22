@@ -9,7 +9,7 @@ from fullyconnect.adapters import StreamReaderAdapter
 from fullyconnect.mqtt import packet_class
 from fullyconnect.errors import MQTTException, NoDataException
 from fullyconnect.mqtt.packet import (
-    RESERVED_0, CONNECT, PUBLISH,
+    RESERVED_0, CONNACK, PUBLISH,
     SUBSCRIBE, SUBACK, UNSUBSCRIBE, UNSUBACK, PINGREQ, PINGRESP, DISCONNECT,
     RESERVED_15, MQTTFixedHeader)
 from fullyconnect.mqtt.publish import PublishPacket
@@ -30,7 +30,7 @@ connections = ConnectionGroup()
 topic_to_target = {}
 
 
-class TCPRelayServer:
+class TCPRelayClientController:
 
     def __init__(self, config):
         self._loop = None
@@ -39,21 +39,26 @@ class TCPRelayServer:
 
     def add_to_loop(self, loop):
         self._loop = loop
-        coro = loop.create_server(lambda: MQTTServerProtocol(self._loop, self._config),
-                                  '0.0.0.0', self._config['port'])
-        self._server = loop.run_until_complete(coro)
+
+        for client_config in self._config['mqtt_client']:
+            mqtt_client = MQTTClientProtocol(loop, client_config)
+            ensure_future(mqtt_client.create_connection(), loop=self._loop)
+        # coro = loop.create_server(lambda: MQTTServerProtocol(self._loop, self._config),
+        #                           '0.0.0.0', self._config['port'])
+        # self._server = loop.run_until_complete(coro)
 
     def close(self):
         self._server.close()
         self._loop.run_until_complete(self._server.wait_closed())
 
 
-class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
+class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
 
     def __init__(self, loop, config):
         super().__init__(loop=loop)
         self._loop = loop
         self._transport = None
+        self._config = config
         self._encryptor = cryptor.Cryptor(config['password'], config['method'])
         # self._auth_ip = config['auth_ip']
 
@@ -67,18 +72,28 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         self._stream_reader = StreamReader(loop=self._loop)
         self._stream_writer = None
         self._reader = None
-        self._approved = False
+        self._connected = False
+        self._write_pending_chunk = []
 
         self._write_task = None
         self._queue = Queue(maxsize=1024, loop=self._loop)
+
+    async def create_connection(self):
+        try:
+            # TODO handle pending task
+            transport, protocol = await self._loop.create_connection(lambda: self, self._config['address'], self._config['port'],
+                                                                     local_addr=(self._config['source_ip'], 0))
+        except OSError as e:
+            logging.error("{0} when connecting to mqtt server({1}:{2})".format(e, self._config['address'], self._config['port']))
+            logging.error("Reconnection will be performed after 5s...")
+            await asyncio.sleep(5)     # TODO:retry interval
+            ensure_future(self.create_connection(), loop=self._loop)
 
     def connection_made(self, transport):
         self._peername = transport.get_extra_info('peername')
         self._transport = transport
 
         connections.add_connection(self)
-        logging.info("Mqtt client connected from: {}.".format(self._peername))
-
         self._stream_reader.set_transport(transport)
         self._reader = StreamReaderAdapter(self._stream_reader)
         self._stream_writer = StreamWriter(transport, self,
@@ -91,7 +106,7 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
 
         self._transport = None
         connections.remove_connection(self)
-        logging.info("Mqtt client connection{} lost.".format(self._peername))
+        logging.info("Lost connection with mqtt server{0}".format(self._peername))
 
         if self._stream_reader is not None:
             if exc is None:
@@ -99,7 +114,13 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
             else:
                 self._stream_reader.set_exception(exc)
 
-        ensure_future(self.stop(), loop=self._loop)
+        ensure_future(self.stop_and_reconnect(), loop=self._loop)
+
+    async def stop_and_reconnect(self):
+        await self.stop()
+        self._stream_reader = StreamReader(loop=self._loop)
+        self._encryptor = cryptor.Cryptor(self._config['password'], self._config['method'])
+        self._loop.call_later(5, lambda: self._loop.create_task(self.create_connection()))
 
     def data_received(self, data):
         self._stream_reader.feed_data(data)
@@ -107,20 +128,27 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
     def eof_received(self):
         self._stream_reader.feed_eof()
 
-    @asyncio.coroutine
-    def start(self):
+    async def start(self):
         self._reader_ready = asyncio.Event(loop=self._loop)
         self._reader_task = asyncio.Task(self._reader_loop(), loop=self._loop)
-        yield from self._reader_ready.wait()
+        await self._reader_ready.wait()
         if self._keepalive_timeout:
             self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
         
         self._write_task = self._loop.create_task(self._consume_write())
 
+        # send connect packet
+        connect_vh = ConnectVariableHeader(keep_alive=self._keepalive_timeout)
+        connect_payload = ConnectPayload(client_id=ConnectPayload.gen_client_id())
+        connect_packet = ConnectPacket(vh=connect_vh, payload=connect_payload)
+        await self._queue.put(connect_packet)
+
+        logging.info("Creating connection to mqtt server...")
+
     async def stop(self):
+        self._connected = False
         if self._transport:
             self._transport.close()
-
         if self._keepalive_task:
             self._keepalive_task.cancel()
         self._write_task.cancel()
@@ -156,8 +184,8 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
                         cls = packet_class(fixed_header)
                         packet = yield from cls.from_stream(self._reader, fixed_header=fixed_header)
                         task = None
-                        if packet.fixed_header.packet_type == CONNECT:
-                            task = ensure_future(self.handle_connect(packet), loop=self._loop)
+                        if packet.fixed_header.packet_type == CONNACK:
+                            task = ensure_future(self.handle_connack(packet), loop=self._loop)
                         elif packet.fixed_header.packet_type == PINGREQ:
                             task = ensure_future(self.handle_pingreq(packet), loop=self._loop)
                         elif packet.fixed_header.packet_type == PINGRESP:
@@ -224,12 +252,15 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
     async def write(self, chunk: DataChunk):
         if self._transport is None or self._transport.is_closing():
             return
-        if chunk.type == ChunkType.DATA:
-            chunk.data = self._encryptor.encrypt(chunk.data)
-        data = chunk.to_bytes()
-        packet = PublishPacket.build("XCH", data, packet_id=None, dup_flag=0, qos=0, retain=0)
+        if not self._connected:
+            self._write_pending_chunk.append(chunk)
+        else:
+            if chunk.type == ChunkType.DATA:
+                chunk.data = self._encryptor.encrypt(chunk.data)
+            data = chunk.to_bytes()
+            packet = PublishPacket.build("XCH", data, packet_id=None, dup_flag=0, qos=0, retain=0)
 
-        await self._queue.put(packet)
+            await self._queue.put(packet)
 
     def handle_write_timeout(self):
         packet = PingReqPacket()
@@ -241,31 +272,32 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
     def handle_read_timeout(self):
         ensure_future(self.stop(), loop=self._loop)
 
-    async def handle_connect(self, connect: ConnectPacket):
-        return_code = 0
-
-        # if self._peername[0] != self._auth_ip:
-        #     return_code = 5
-        #     logging.warning("Not authorized connection: {}!".format(self._peername))
-
-        connack_vh = ConnackVariableHeader(return_code=return_code)
-        connack = ConnackPacket(variable_header=connack_vh)
-        await self._queue.put(connack)
-
-        if return_code != 0:
+    async def handle_connack(self, connack: ConnackPacket):
+        if connack.variable_header.return_code == 0:
+            packet = PublishPacket.build("auth",
+                                         self._encryptor.encrypt(self._encryptor.password.encode('utf-8')),
+                                         None, dup_flag=0, qos=0, retain=0)
+            await self._queue.put(packet)
+        else:
+            logging.info("Unable to create connection to mqtt server! Shutting down...")
             await self.stop()
 
     async def handle_publish(self, publish_packet: PublishPacket):
-        if not self._approved:
+        data = bytes(publish_packet.data)
+        if not self._connected:
             if publish_packet.topic_name == "auth":
-                password = self._encryptor.decrypt(bytes(publish_packet.data)).decode('utf-8')
+                password = self._encryptor.decrypt(data).decode('utf-8')
                 if password == self._encryptor.password:
-                    self._approved = True
-                    packet = PublishPacket.build("auth",
-                                                 self._encryptor.encrypt(self._encryptor.password.encode('utf-8')),
-                                                 None, dup_flag=0, qos=0, retain=0)
-                    await self._queue.put(packet)
+                    self._connected = True
+                    logging.info("Connection to mqtt server established!")
+
+                    # TODO polish here
+                    if len(self._write_pending_chunk) > 0:
+                        for chunk in self._write_pending_chunk:
+                            await self.write(chunk)
+                        self._write_pending_chunk = []
                 else:
+                    logging.info("Connection authorization failed! Shuting down...")
                     await self.stop()
             else:
                 await self.stop()
@@ -450,7 +482,16 @@ class RelayTargetProtocol(asyncio.Protocol):
 
 
 if __name__ == "__main__":
-    server = TCPRelayServer({"password": "123456", "method": "aes-128-cfb", "timeout": 60, "port": 1883})
+    config = {
+        "mqtt_client": [
+            {"password": "123456", "method": "aes-128-cfb", "timeout": 60, "address": "10.0.6.97", "port": 1883,
+             "source_ip": "10.0.6.97"}
+            ,
+            {"password": "123456", "method": "aes-128-cfb", "timeout": 60, "address": "10.0.6.97", "port": 1883,
+             "source_ip": "10.0.6.97"}
+        ]
+    }
+    server = TCPRelayClientController(config)
     # import uvloop
     # loop = uvloop.new_event_loop()
     # asyncio.set_event_loop(loop)
