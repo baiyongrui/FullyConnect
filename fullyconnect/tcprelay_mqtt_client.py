@@ -17,7 +17,7 @@ from fullyconnect.mqtt.pingreq import PingReqPacket
 from fullyconnect.mqtt.connect import ConnectPacket, ConnectPayload, ConnectVariableHeader
 from fullyconnect.mqtt.connack import ConnackPacket, ConnackVariableHeader
 from fullyconnect.mqtt.pingresp import PingRespPacket
-from fullyconnect.ConnectionGroup import ConnectionGroup
+from fullyconnect.ConnectionGroup import ConnectionPool
 from fullyconnect.DataChunk import DataChunk, ChunkType, ChunkProcessor
 
 logging.basicConfig(level=logging.DEBUG,
@@ -37,7 +37,7 @@ def topic_generator():
 
 
 f_topic_generator = topic_generator()
-mqtt_connections = ConnectionGroup()
+mqtt_connections = ConnectionPool()
 topic_to_clients = {}
 
 
@@ -96,8 +96,7 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
     async def create_connection(self):
         try:
             # TODO handle pending task
-            transport, protocol = await self._loop.create_connection(lambda: self, self._config['address'], self._config['port'],
-                                                                     local_addr=(self._config['source_ip'], 0))
+            transport, protocol = await self._loop.create_connection(lambda: self, self._config['address'], self._config['port'])
         except OSError as e:
             logging.error("{0} when connecting to mqtt server({1}:{2})".format(e, self._config['address'], self._config['port']))
             logging.error("Reconnection will be performed after 5s...")
@@ -108,7 +107,6 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
         self._peername = transport.get_extra_info('peername')
         self._transport = transport
 
-        mqtt_connections.add_connection(self)
         self._stream_reader.set_transport(transport)
         self._reader = StreamReaderAdapter(self._stream_reader)
         self._stream_writer = StreamWriter(transport, self,
@@ -120,7 +118,7 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
         super().connection_lost(exc)
 
         self._transport = None
-        mqtt_connections.remove_connection(self)
+        mqtt_connections.remove(self)
         logging.info("Lost connection with mqtt server{0}".format(self._peername))
 
         if self._stream_reader is not None:
@@ -291,6 +289,7 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
                                          self._encryptor.encrypt(self._encryptor.password.encode('utf-8')),
                                          None, dup_flag=0, qos=0, retain=0)
             await self._queue.put(packet)
+            mqtt_connections.add(self)
         else:
             logging.info("Unable to create connection to mqtt server! Shutting down...")
             await self.stop()
@@ -416,7 +415,7 @@ class RelayServerProtocol(asyncio.Protocol):
     async def relay_data(self, data: bytes):
         chunks = self._chunk_processor.pack_data(self._connection_id, data)
         for chunk in chunks:
-            mqtt_carrier = mqtt_connections.pick_connection()
+            mqtt_carrier = mqtt_connections.fetch()
             if mqtt_carrier is None:
                 logging.warning("No mqtt carrier available, closing relay server")
                 self.close()
@@ -425,25 +424,25 @@ class RelayServerProtocol(asyncio.Protocol):
 
     async def relay_connect(self, data: bytes):
         chunk = self._chunk_processor.pack_connect(self._connection_id, data)
-        mqtt_carrier = mqtt_connections.pick_connection()
+        mqtt_carrier = mqtt_connections.fetch()
         if mqtt_carrier is not None:
             await mqtt_carrier.write(chunk)
 
     async def relay_disconnect(self):
         chunk = self._chunk_processor.pack_disconnect(self._connection_id)
-        mqtt_carrier = mqtt_connections.pick_connection()
+        mqtt_carrier = mqtt_connections.fetch()
         if mqtt_carrier is not None:
             await mqtt_carrier.write(chunk)
 
     async def relay_high_water_mark(self):
         chunk = self._chunk_processor.pack_hwm(self._connection_id)
-        mqtt_carrier = mqtt_connections.pick_connection()
+        mqtt_carrier = mqtt_connections.fetch()
         if mqtt_carrier is not None:
             await mqtt_carrier.write(chunk)
     
     async def relay_low_water_mark(self):
         chunk = self._chunk_processor.pack_lwm(self._connection_id)
-        mqtt_carrier = mqtt_connections.pick_connection()
+        mqtt_carrier = mqtt_connections.fetch()
         if mqtt_carrier is not None:
             await mqtt_carrier.write(chunk)
 
@@ -480,13 +479,11 @@ if __name__ == "__main__":
 
     config = {
         "mqtt_client": [
-            {"password": "123456", "method": "aes-128-cfb", "timeout": 60, "address": "10.0.6.94", "port": 1883,
-             "source_ip": "10.0.6.94"}
-            ,
-            {"password": "123456", "method": "aes-128-cfb", "timeout": 60, "address": "10.0.6.94", "port": 1883,
-             "source_ip": "10.0.6.94"}
-            ],
-        "server": {"password": "123456", "method": "rc4-md5", "timeout": 60, "port": 8700}}
+            {"password": "123456", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883},
+            {"password": "123456", "method": "aes-128-cfb", "timeout": 60, "address": "127.0.0.1", "port": 1883}
+        ],
+        "server": {"password": "123456", "method": "rc4-md5", "timeout": 60, "port": 8700}
+    }
 
     server = TCPRelayServer(config)
     # import uvloop

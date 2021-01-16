@@ -26,7 +26,7 @@ logging.basicConfig(level=logging.DEBUG,
 logger = logging.getLogger(__name__)
 
 
-connections = ConnectionGroup()
+connection_group = ConnectionGroup()
 topic_to_target = {}
 
 
@@ -76,7 +76,6 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         self._peername = transport.get_extra_info('peername')
         self._transport = transport
 
-        connections.add_connection(self)
         logging.info("Mqtt client connected from: {}.".format(self._peername))
 
         self._stream_reader.set_transport(transport)
@@ -90,7 +89,7 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         super().connection_lost(exc)
 
         self._transport = None
-        connections.remove_connection(self)
+        connection_group.remove_connection(self, self._peername)
         logging.info("Mqtt client connection{} lost.".format(self._peername))
 
         if self._stream_reader is not None:
@@ -265,6 +264,7 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
                                                  self._encryptor.encrypt(self._encryptor.password.encode('utf-8')),
                                                  None, dup_flag=0, qos=0, retain=0)
                     await self._queue.put(packet)
+                    connection_group.add_connection(self, self._peername)
                 else:
                     await self.stop()
             else:
@@ -275,7 +275,8 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         if chunk is not None:
             target = topic_to_target.get(chunk.connection_id, None)
             if target is None:
-                target = RelayTargetProtocol(self._loop, chunk.connection_id)
+                conn_pool = connection_group.get(self._peername)
+                target = RelayTargetProtocol(self._loop, chunk.connection_id, conn_pool)
                 topic_to_target[chunk.connection_id] = target
             # TODO chunk.data is not None?
             if chunk.type == ChunkType.DATA or chunk.type == ChunkType.CONNECT:
@@ -300,12 +301,13 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
 
 class RelayTargetProtocol(asyncio.Protocol):
 
-    def __init__(self, loop, connection_id):
+    def __init__(self, loop, connection_id, connection_pool):
         self._loop = loop
         self._transport = None
         self._write_pending_data = []
         self._connected = False
         self._connection_id = connection_id
+        self._connection_pool = connection_pool
 
         self._peername = None
 
@@ -327,7 +329,7 @@ class RelayTargetProtocol(asyncio.Protocol):
         self._idle_task.cancel()
         self._idle_task = None
 
-        if len(connections) == 0:
+        if len(self._connection_pool) == 0:
             self._transport.close()
             return
 
@@ -368,7 +370,7 @@ class RelayTargetProtocol(asyncio.Protocol):
     async def relay_data(self, data: bytes):
         chunks = self._chunk_processor.pack_data(self._connection_id, data)
         for chunk in chunks:
-            mqtt_carrier = connections.pick_connection()
+            mqtt_carrier = self._connection_pool.fetch()
             if mqtt_carrier is None:
                 logging.warning("No mqtt carrier available, closing relay target")
                 self.close()
@@ -377,7 +379,7 @@ class RelayTargetProtocol(asyncio.Protocol):
 
     async def relay_disconnect(self):
         chunk = self._chunk_processor.pack_disconnect(self._connection_id)
-        mqtt_carrier = connections.pick_connection()
+        mqtt_carrier = self._connection_pool.fetch()
         if mqtt_carrier is not None:
             await mqtt_carrier.write(chunk)
 
