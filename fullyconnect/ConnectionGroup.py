@@ -8,7 +8,10 @@ class ConnectionPool:
         self._pool.append(conn)
 
     def remove(self, conn):
-        self._pool.remove(conn)
+        try:
+            self._pool.remove(conn)
+        except ValueError:
+            pass
 
         if self._fetched_idx >= len(self._pool):
             self._fetched_idx = 0

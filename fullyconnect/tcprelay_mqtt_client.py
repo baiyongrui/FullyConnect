@@ -104,6 +104,8 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
             ensure_future(self.create_connection(), loop=self._loop)
 
     def connection_made(self, transport):
+        # From FlowControlMixin
+        self._connection_lost = False
         self._peername = transport.get_extra_info('peername')
         self._transport = transport
 
@@ -148,6 +150,7 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
         if self._keepalive_timeout:
             self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
 
+        self._queue = Queue(maxsize=1024, loop=self._loop)
         self._write_task = self._loop.create_task(self._consume_write())        
 
         # send connect packet

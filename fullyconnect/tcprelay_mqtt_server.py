@@ -253,6 +253,8 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
 
         if return_code != 0:
             await self.stop()
+        else:
+            connection_group.add_connection(self, self._peername)
 
     async def handle_publish(self, publish_packet: PublishPacket):
         if not self._approved:
@@ -264,7 +266,6 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
                                                  self._encryptor.encrypt(self._encryptor.password.encode('utf-8')),
                                                  None, dup_flag=0, qos=0, retain=0)
                     await self._queue.put(packet)
-                    connection_group.add_connection(self, self._peername)
                 else:
                     await self.stop()
             else:
