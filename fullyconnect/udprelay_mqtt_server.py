@@ -2,11 +2,12 @@ import collections
 import struct
 import asyncio
 from asyncio import StreamReader, StreamWriter
+from asyncio.streams import FlowControlMixin
 from asyncio import ensure_future, Queue
 import logging
 
 from fullyconnect import cryptor, common
-from fullyconnect.adapters import StreamReaderAdapter, FlowControlMixin
+from fullyconnect.adapters import StreamReaderAdapter
 from fullyconnect.mqtt import packet_class
 from fullyconnect.errors import MQTTException, NoDataException
 from fullyconnect.mqtt.packet import (
@@ -76,7 +77,6 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         self._peername = transport.get_extra_info('peername')
         self._transport = transport
 
-        connections.add_connection(self)
         logging.info("Mqtt client connected from: {}.".format(self._peername))
 
         self._stream_reader.set_transport(transport)
@@ -87,7 +87,7 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         self._loop.create_task(self.start())
 
     def connection_lost(self, exc):
-        connections.remove_connection(self)
+        connections.remove_connection(self, self._peername)
         logging.info("Mqtt client connection{} lost.".format(self._peername))
         super().connection_lost(exc)
 
@@ -265,6 +265,7 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
                                                  self._encryptor.encrypt(self._encryptor.password.encode('utf-8')),
                                                  None, dup_flag=0, qos=0, retain=0)
                     yield from self._do_write(packet)
+                    connections.add_connection(self, self._peername)
                 else:
                     self._loop.create_task(self.stop())
             else:
@@ -284,7 +285,8 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
 
         target = topic_to_target.get(publish_packet.topic_name)
         if not target:
-            target = RelayTargetProtocol(self._loop, publish_packet.topic_name)
+            conn_pool = connections.get(self._peername)
+            target = RelayTargetProtocol(self._loop, publish_packet.topic_name, conn_pool)
             topic_to_target[publish_packet.topic_name] = target
             self._loop.create_task(self.create_endpoint(target, common.to_str(remote_addr), remote_port))
 
@@ -310,12 +312,13 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
 
 class RelayTargetProtocol(asyncio.DatagramProtocol):
 
-    def __init__(self, loop, client_topic):
+    def __init__(self, loop, client_topic, conn_pool):
         self._loop = loop
         self._transport = None
         self._write_pending_data = []
         self._connected = False
         self.client_topic = client_topic
+        self._conn_pool = conn_pool
         self._last_activity = 0     # for read timeout
         # TODO: from config
         self._timeout = 60
@@ -345,7 +348,7 @@ class RelayTargetProtocol(asyncio.DatagramProtocol):
         self._timeout_handle = None
 
     def datagram_received(self, data, addr):
-        conn = connections.pick_connection()
+        conn = self._conn_pool.fetch()
         if conn is None:
             logging.warning("No available client connections, closing relay target")
             self.close()

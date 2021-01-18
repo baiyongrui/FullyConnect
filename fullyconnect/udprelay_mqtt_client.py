@@ -1,11 +1,12 @@
 import collections
 import asyncio
 from asyncio import StreamReader, StreamWriter
+from asyncio.streams import FlowControlMixin
 from asyncio import ensure_future, Queue
 import logging
 
 from fullyconnect import cryptor, common
-from fullyconnect.adapters import StreamReaderAdapter, FlowControlMixin
+from fullyconnect.adapters import StreamReaderAdapter
 from fullyconnect.mqtt import packet_class
 from fullyconnect.errors import MQTTException, NoDataException
 from fullyconnect.mqtt.packet import (
@@ -49,16 +50,17 @@ class UDPRelayServer:
 
         # TODO remove
         self._mqtt_client = None
-        self._mqtt_client_connections = ConnectionGroup()
+        # self._mqtt_client_connections = ConnectionGroup()
 
     def add_to_loop(self, loop):
         self._loop = loop
 
         mqtt_client = MQTTClientProtocol(loop, self._config['mqtt_client'])
-        self._mqtt_client_connections.add_connection(mqtt_client)
+        self._mqtt_client = mqtt_client
+        # self._mqtt_client_connections.add_connection(mqtt_client)
         self._loop.create_task(mqtt_client.create_connection())
 
-        coro = loop.create_datagram_endpoint(lambda: RelayServerProtocol(self._loop, self._config['server'], self._mqtt_client_connections),
+        coro = loop.create_datagram_endpoint(lambda: RelayServerProtocol(self._loop, self._config['server'], self._mqtt_client),
                                   local_addr=('0.0.0.0', self._config['server']['port']))
         self._server = loop.run_until_complete(coro)
 
@@ -356,11 +358,11 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
 
 class RelayServerProtocol(asyncio.DatagramProtocol):
 
-    def __init__(self, loop, config, mqtt_client_groups: ConnectionGroup):
+    def __init__(self, loop, config, mqtt_client):
         self._loop = loop
         self._transport = None
 
-        self._mqtt_client = mqtt_client_groups.pick_connection()
+        self._mqtt_client = mqtt_client
 
         self._password = common.to_bytes(config['password'])
         self._method = config['method']
@@ -408,7 +410,7 @@ if __name__ == "__main__":
 
     config = {
         "mqtt_client": {"password": "123456", "method": "aes-128-cfb", "timeout": 180, "address": "127.0.0.1", "port": 1884},
-        "server": {"password": "123456", "method": "rc4-md5", "timeout": 60, "port": 1370}}
+        "server": {"password": "123456", "method": "rc4-md5", "timeout": 60, "port": 8700}}
 
     server = UDPRelayServer(config)
     # import uvloop
