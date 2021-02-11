@@ -196,7 +196,10 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
                         break
                     else:
                         cls = packet_class(fixed_header)
-                        packet = yield from cls.from_stream(self._reader, fixed_header=fixed_header)
+                        drop_variable_header = False
+                        if self._connected and cls == PublishPacket:
+                            drop_variable_header = True
+                        packet = yield from cls.from_stream(self._reader, fixed_header=fixed_header, drop_variable_header=drop_variable_header)
                         task = None
                         if packet.fixed_header.packet_type == CONNACK:
                             task = ensure_future(self.handle_connack(packet), loop=self._loop)
@@ -272,7 +275,8 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
             if chunk.type == ChunkType.DATA or chunk.type == ChunkType.CONNECT:
                 chunk.data = self._encryptor.encrypt(chunk.data)
             data = chunk.to_bytes()
-            packet = PublishPacket.build("XCH", data, packet_id=None, dup_flag=0, qos=0, retain=0)
+            # packet = PublishPacket.build("XCH", data, packet_id=None, dup_flag=0, qos=0, retain=0)
+            packet = PublishPacket.build(None, data, packet_id=None, dup_flag=0, qos=0, retain=0)
 
             await self._queue.put(packet)
 

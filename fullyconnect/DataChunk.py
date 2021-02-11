@@ -16,8 +16,8 @@ class ChunkType(IntEnum):
 class DataChunk:
     def __init__(self, type: ChunkType, chunk_id: int, connection_id: int, data: bytes = None):
         self._type = type                       # 1 byte
-        self._id = chunk_id                     # 4 byte
-        self._connection_id = connection_id     # 4 byte
+        self._id = chunk_id                     # 2 byte
+        self._connection_id = connection_id     # 2 byte
         self._data = data
 
     @property

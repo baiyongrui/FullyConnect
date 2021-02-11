@@ -211,10 +211,10 @@ class MQTTPacket:
 
     @classmethod
     @asyncio.coroutine
-    def from_stream(cls, reader: ReaderAdapter, fixed_header=None, variable_header=None):
+    def from_stream(cls, reader: ReaderAdapter, fixed_header=None, variable_header=None, drop_variable_header=False):
         if fixed_header is None:
             fixed_header = yield from cls.FIXED_HEADER.from_stream(reader)
-        if cls.VARIABLE_HEADER:
+        if cls.VARIABLE_HEADER and not drop_variable_header:
             if variable_header is None:
                 variable_header = yield from cls.VARIABLE_HEADER.from_stream(reader, fixed_header)
         else:

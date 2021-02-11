@@ -51,7 +51,9 @@ class PublishPayload(MQTTPayload):
     def from_stream(cls, reader: asyncio.StreamReader, fixed_header: MQTTFixedHeader,
                     variable_header: MQTTVariableHeader):
         data = bytearray()
-        data_length = fixed_header.remaining_length - variable_header.bytes_length
+        data_length = fixed_header.remaining_length
+        if variable_header is not None:
+            data_length -= variable_header.bytes_length
         length_read = 0
         while length_read < data_length:
             buffer = yield from reader.read(data_length - length_read)
@@ -152,7 +154,9 @@ class PublishPacket(MQTTPacket):
     @classmethod
     def build(cls, topic_name: str, message: bytes, packet_id: int, dup_flag, qos, retain):
         # FIXME: qos != 1/2 packet_id need to be None
-        v_header = PublishVariableHeader(topic_name, packet_id)
+        v_header = None
+        if topic_name is not None:
+            v_header = PublishVariableHeader(topic_name, packet_id)
         payload = PublishPayload(message)
         packet = PublishPacket(variable_header=v_header, payload=payload)
         packet.dup_flag = dup_flag
