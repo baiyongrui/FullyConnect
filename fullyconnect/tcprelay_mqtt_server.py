@@ -60,7 +60,6 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         self._peername = None
 
         self._reader_task = None
-        self._keepalive_task = None
         self._keepalive_timeout = config['timeout']
         self._reader_ready = None
         self._reader_stopped = asyncio.Event(loop=self._loop)
@@ -111,17 +110,13 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         self._reader_ready = asyncio.Event(loop=self._loop)
         self._reader_task = asyncio.Task(self._reader_loop(), loop=self._loop)
         yield from self._reader_ready.wait()
-        if self._keepalive_timeout:
-            self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
-        
+
         self._write_task = self._loop.create_task(self._consume_write())
 
     async def stop(self):
         if self._transport:
             self._transport.close()
 
-        if self._keepalive_task:
-            self._keepalive_task.cancel()
         self._write_task.cancel()
         if not self._reader_task.done():
             if not self._reader_stopped.is_set():
@@ -215,9 +210,6 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
     async def _send_packet(self, packet):
         try:
             await packet.to_stream(self._stream_writer)
-            self._keepalive_task.cancel()
-            self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
-
             return True
         except ConnectionResetError:
             return False
@@ -233,16 +225,6 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         packet = PublishPacket.build(None, data, packet_id=None, dup_flag=0, qos=0, retain=0)
 
         await self._queue.put(packet)
-
-    def handle_write_timeout(self):
-        packet = PingReqPacket()
-
-        ensure_future(self._queue.put(packet), loop=self._loop)
-        self._keepalive_task.cancel()
-        self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
-
-    def handle_read_timeout(self):
-        ensure_future(self.stop(), loop=self._loop)
 
     async def handle_connect(self, connect: ConnectPacket):
         return_code = 0

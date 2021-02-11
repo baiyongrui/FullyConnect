@@ -287,9 +287,6 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
         self._keepalive_task.cancel()
         self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
 
-    def handle_read_timeout(self):
-        ensure_future(self.stop(), loop=self._loop)
-
     async def handle_connack(self, connack: ConnackPacket):
         if connack.variable_header.return_code == 0:
             packet = PublishPacket.build("auth",
@@ -333,7 +330,7 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
                 client.deliver(chunk)
             else:
                 logging.info(
-                    "Received unregistered publish topic({0}) from mqtt server, packet will be ignored.".format(
+                    "Received unregistered connection_id({0}) from mqtt server, packet will be ignored.".format(
                         chunk.connection_id))
         else:
             logging.warning("Invalid chunk, packet will be ignored.")
