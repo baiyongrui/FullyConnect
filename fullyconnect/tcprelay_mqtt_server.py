@@ -111,8 +111,6 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         self._reader_task = asyncio.Task(self._reader_loop(), loop=self._loop)
         yield from self._reader_ready.wait()
 
-        self._write_task = self._loop.create_task(self._consume_write())
-
     async def stop(self):
         if self._transport:
             self._transport.close()
@@ -205,6 +203,7 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
             if self._transport is None or packet is None:
                 break
             if not await self._send_packet(packet):
+                await self._queue.put(packet)
                 break
             
     async def _send_packet(self, packet):
@@ -235,23 +234,26 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
 
         connack_vh = ConnackVariableHeader(return_code=return_code)
         connack = ConnackPacket(variable_header=connack_vh)
-        await self._queue.put(connack)
-
-        if return_code != 0:
-            await self.stop()
+        if await self._send_packet(connack):
+            if return_code != 0:
+                await self.stop()
         else:
-            connection_group.add_connection(self, self._peername)
+            await self.stop()
 
     async def handle_publish(self, publish_packet: PublishPacket):
         if not self._approved:
             if publish_packet.topic_name == "auth":
                 password = self._encryptor.decrypt(bytes(publish_packet.data)).decode('utf-8')
                 if password == self._encryptor.password:
-                    self._approved = True
                     packet = PublishPacket.build("auth",
                                                  self._encryptor.encrypt(self._encryptor.password.encode('utf-8')),
                                                  None, dup_flag=0, qos=0, retain=0)
-                    await self._queue.put(packet)
+                    if await self._send_packet(packet):
+                        connection_group.add_connection(self, self._peername)
+                        self._approved = True
+                        self._write_task = self._loop.create_task(self._consume_write())
+                    else:
+                        await self.stop()
                 else:
                     await self.stop()
             else:

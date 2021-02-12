@@ -150,16 +150,14 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
         if self._keepalive_timeout:
             self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
 
-        self._queue = Queue(maxsize=1024, loop=self._loop)
-        self._write_task = self._loop.create_task(self._consume_write())        
-
-        # send connect packet
+        # Send connect packet
         connect_vh = ConnectVariableHeader(keep_alive=self._keepalive_timeout)
         connect_payload = ConnectPayload(client_id=ConnectPayload.gen_client_id())
         connect_packet = ConnectPacket(vh=connect_vh, payload=connect_payload)
-        await self._queue.put(connect_packet)
 
         logging.info("Creating connection to mqtt server.")
+        if not await self._send_packet(connect_packet):
+            return
 
     async def stop(self):
         self._connected = False
@@ -253,6 +251,7 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
             if self._transport is None or packet is None:
                 break
             if not await self._send_packet(packet):
+                await self._queue.put(packet)
                 break
 
     async def _send_packet(self, packet):
@@ -292,8 +291,11 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
             packet = PublishPacket.build("auth",
                                          self._encryptor.encrypt(self._encryptor.password.encode('utf-8')),
                                          None, dup_flag=0, qos=0, retain=0)
-            await self._queue.put(packet)
-            mqtt_connections.add(self)
+            if await self._send_packet(packet):
+                mqtt_connections.add(self)
+                self._write_task = self._loop.create_task(self._consume_write())
+            else:
+                await self.stop()
         else:
             logging.info("Unable to create connection to mqtt server! Shutting down...")
             await self.stop()
