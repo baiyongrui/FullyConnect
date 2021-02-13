@@ -113,7 +113,8 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
         if self._transport:
             self._transport.close()
 
-        self._write_task.cancel()
+        if self._write_task:
+            self._write_task.cancel()
         if not self._reader_task.done():
             if not self._reader_stopped.is_set():
                 self._reader_task.cancel()  # this will cause the reader_loop handle CancelledError

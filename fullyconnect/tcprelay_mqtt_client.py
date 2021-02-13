@@ -164,7 +164,8 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
 
         if self._keepalive_task:
             self._keepalive_task.cancel()
-        self._write_task.cancel()
+        if self._write_task:
+            self._write_task.cancel()
         if not self._reader_task.done():
             if not self._reader_stopped.is_set():
                 self._reader_task.cancel()  # this will cause the reader_loop handle CancelledError
