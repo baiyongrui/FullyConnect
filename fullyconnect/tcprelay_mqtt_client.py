@@ -3,15 +3,13 @@ import asyncio
 from asyncio import StreamReader, StreamWriter, ensure_future, Queue
 from asyncio.streams import FlowControlMixin
 import logging
+import time
 
 from fullyconnect import cryptor, common
 from fullyconnect.adapters import StreamReaderAdapter
 from fullyconnect.mqtt import packet_class
 from fullyconnect.errors import MQTTException, NoDataException
-from fullyconnect.mqtt.packet import (
-    RESERVED_0, CONNACK, PUBLISH,
-    SUBSCRIBE, SUBACK, UNSUBSCRIBE, UNSUBACK, PINGREQ, PINGRESP, DISCONNECT,
-    RESERVED_15, MQTTFixedHeader)
+from fullyconnect.mqtt.packet import RESERVED_0, CONNACK, PUBLISH, PINGRESP, DISCONNECT, RESERVED_15, MQTTFixedHeader
 from fullyconnect.mqtt.publish import PublishPacket
 from fullyconnect.mqtt.pingreq import PingReqPacket
 from fullyconnect.mqtt.connect import ConnectPacket, ConnectPayload, ConnectVariableHeader
@@ -26,17 +24,16 @@ logging.basicConfig(level=logging.DEBUG,
 logger = logging.getLogger(__name__)
 
 
-def topic_generator():
+def id_generator():
     seq = 0
     while True:
-        # yield "$SYS/{}".format(seq)
         yield seq
         seq += 1
         if seq >= 65535:
             seq = 0
 
 
-f_topic_generator = topic_generator()
+f_id_generator = id_generator()
 mqtt_connections = ConnectionPool()
 topic_to_clients = {}
 
@@ -148,7 +145,7 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
         self._reader_task = asyncio.Task(self._reader_loop(), loop=self._loop)
         await self._reader_ready.wait()
         if self._keepalive_timeout:
-            self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
+            self._keepalive_task = self._loop.create_task(self.handle_keepalive())
 
         # Send connect packet
         connect_vh = ConnectVariableHeader(keep_alive=self._keepalive_timeout)
@@ -194,28 +191,17 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
                         break
                     else:
                         cls = packet_class(fixed_header)
-                        drop_variable_header = False
+                        skip_variable_header = False
                         if self._connected and cls == PublishPacket:
-                            drop_variable_header = True
-                        packet = yield from cls.from_stream(self._reader, fixed_header=fixed_header, drop_variable_header=drop_variable_header)
+                            skip_variable_header = True
+                        packet = yield from cls.from_stream(self._reader, fixed_header=fixed_header, skip_variable_header=skip_variable_header)
                         task = None
                         if packet.fixed_header.packet_type == CONNACK:
                             task = ensure_future(self.handle_connack(packet), loop=self._loop)
-                        elif packet.fixed_header.packet_type == PINGREQ:
-                            task = ensure_future(self.handle_pingreq(packet), loop=self._loop)
                         elif packet.fixed_header.packet_type == PINGRESP:
                             task = ensure_future(self.handle_pingresp(packet), loop=self._loop)
                         elif packet.fixed_header.packet_type == PUBLISH:
                             task = ensure_future(self.handle_publish(packet), loop=self._loop)
-                            # self.handle_publish(packet)
-                        # elif packet.fixed_header.packet_type == SUBSCRIBE:
-                        #     task = ensure_future(self.handle_subscribe(packet), loop=self._loop)
-                        # elif packet.fixed_header.packet_type == UNSUBSCRIBE:
-                        #     task = ensure_future(self.handle_unsubscribe(packet), loop=self._loop)
-                        # elif packet.fixed_header.packet_type == SUBACK:
-                        #     task = ensure_future(self.handle_suback(packet), loop=self._loop)
-                        # elif packet.fixed_header.packet_type == UNSUBACK:
-                        #     task = ensure_future(self.handle_unsuback(packet), loop=self._loop)
                         elif packet.fixed_header.packet_type == DISCONNECT:
                             task = ensure_future(self.handle_disconnect(packet), loop=self._loop)
                         else:
@@ -248,18 +234,20 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
     async def _consume_write(self):
         while self._transport is not None:
             packet = await self._queue.get()
-            if self._transport is None or packet is None:
-                break
-            if not await self._send_packet(packet):
+            self._keepalive_task.cancel()
+            if packet.protocol_ts is not None and time.time() - packet.protocol_ts >= self._keepalive_timeout / 4:
+                continue
+            if self._transport is None or not await self._send_packet(packet):
                 await self._queue.put(packet)
                 break
 
+            if self._queue.qsize() == 0:
+                self._keepalive_task = self._loop.create_task(self.handle_keepalive())
+
     async def _send_packet(self, packet):
         try:
+            packet.protocol_ts = time.time()
             await packet.to_stream(self._stream_writer)
-            self._keepalive_task.cancel()
-            self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
-
             return True
         except ConnectionResetError:
             return False
@@ -279,12 +267,16 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
 
             await self._queue.put(packet)
 
-    def handle_write_timeout(self):
-        packet = PingReqPacket()
-
-        ensure_future(self._queue.put(packet), loop=self._loop)
-        self._keepalive_task.cancel()
-        self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
+    async def handle_keepalive(self):
+        try:
+            await asyncio.sleep(self._keepalive_timeout)
+            packet = PingReqPacket()
+            if not await self._send_packet(packet):
+                await self.stop()
+            else:
+                self._keepalive_task = self._loop.create_task(self.handle_keepalive())
+        except asyncio.CancelledError:
+            pass
 
     async def handle_connack(self, connack: ConnackPacket):
         if connack.variable_header.return_code == 0:
@@ -311,11 +303,9 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
 
                     # TODO polish here
                     if len(self._write_pending_data) > 0:
-                        self._keepalive_task.cancel()
                         for chunk in self._write_pending_data:
                             await self.write(chunk)
                         self._write_pending_data = []
-                        self._keepalive_task = self._loop.call_later(self._keepalive_timeout, self.handle_write_timeout)
                 else:
                     logging.info("Connection authorization failed! Shuting down...")
                     await self.stop()
@@ -340,11 +330,6 @@ class MQTTClientProtocol(FlowControlMixin, asyncio.Protocol):
     async def handle_pingresp(self, pingresp: PingRespPacket):
         logging.info("Received PingRespPacket from mqtt server.")
 
-    async def handle_pingreq(self, pingreq: PingReqPacket):
-        logging.info("Received PingReqPacket from mqtt server, Replying PingResqPacket.")
-        packet = PingRespPacket()
-        await self._queue.put(packet)
-
 
 class RelayServerProtocol(asyncio.Protocol):
 
@@ -361,7 +346,7 @@ class RelayServerProtocol(asyncio.Protocol):
 
         self._manual_close = False
 
-        self._connection_id = next(f_topic_generator)   # Topic as connection id
+        self._connection_id = next(f_id_generator)
         topic_to_clients[self._connection_id] = self
 
         self._encryptor = cryptor.Cryptor(config['password'], config['method'])

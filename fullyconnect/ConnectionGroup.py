@@ -1,3 +1,5 @@
+import random
+
 
 class ConnectionPool:
     def __init__(self):
@@ -16,11 +18,19 @@ class ConnectionPool:
         if self._fetched_idx >= len(self._pool):
             self._fetched_idx = 0
 
+    # def fetch(self):
+    #     num_conns = len(self._pool)
+    #     if num_conns > 0:
+    #         conn = self._pool[self._fetched_idx % num_conns]
+    #         self._fetched_idx += 1
+    #         return conn
+    #     else:
+    #         return None
+
     def fetch(self):
         num_conns = len(self._pool)
         if num_conns > 0:
-            conn = self._pool[self._fetched_idx % num_conns]
-            self._fetched_idx += 1
+            conn = random.choice(self._pool)
             return conn
         else:
             return None

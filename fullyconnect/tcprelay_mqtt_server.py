@@ -3,15 +3,13 @@ import asyncio
 from asyncio import StreamReader, StreamWriter, ensure_future, Queue
 from asyncio.streams import FlowControlMixin
 import logging
+import time
 
 from fullyconnect import cryptor, common
 from fullyconnect.adapters import StreamReaderAdapter
 from fullyconnect.mqtt import packet_class
 from fullyconnect.errors import MQTTException, NoDataException
-from fullyconnect.mqtt.packet import (
-    RESERVED_0, CONNECT, PUBLISH,
-    SUBSCRIBE, SUBACK, UNSUBSCRIBE, UNSUBACK, PINGREQ, PINGRESP, DISCONNECT,
-    RESERVED_15, MQTTFixedHeader)
+from fullyconnect.mqtt.packet import RESERVED_0, CONNECT, PUBLISH, PINGREQ, DISCONNECT, RESERVED_15, MQTTFixedHeader
 from fullyconnect.mqtt.publish import PublishPacket
 from fullyconnect.mqtt.pingreq import PingReqPacket
 from fullyconnect.mqtt.connect import ConnectPacket, ConnectPayload, ConnectVariableHeader
@@ -146,28 +144,17 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
                         break
                     else:
                         cls = packet_class(fixed_header)
-                        drop_variable_header = False
+                        skip_variable_header = False
                         if self._approved and cls == PublishPacket:
-                            drop_variable_header = True
-                        packet = yield from cls.from_stream(self._reader, fixed_header=fixed_header, drop_variable_header=drop_variable_header)
+                            skip_variable_header = True
+                        packet = yield from cls.from_stream(self._reader, fixed_header=fixed_header, skip_variable_header=skip_variable_header)
                         task = None
                         if packet.fixed_header.packet_type == CONNECT:
                             task = ensure_future(self.handle_connect(packet), loop=self._loop)
                         elif packet.fixed_header.packet_type == PINGREQ:
                             task = ensure_future(self.handle_pingreq(packet), loop=self._loop)
-                        elif packet.fixed_header.packet_type == PINGRESP:
-                            task = ensure_future(self.handle_pingresp(packet), loop=self._loop)
                         elif packet.fixed_header.packet_type == PUBLISH:
                             task = ensure_future(self.handle_publish(packet), loop=self._loop)
-                            # self.handle_publish(packet)
-                        # elif packet.fixed_header.packet_type == SUBSCRIBE:
-                        #     task = ensure_future(self.handle_subscribe(packet), loop=self._loop)
-                        # elif packet.fixed_header.packet_type == UNSUBSCRIBE:
-                        #     task = ensure_future(self.handle_unsubscribe(packet), loop=self._loop)
-                        # elif packet.fixed_header.packet_type == SUBACK:
-                        #     task = ensure_future(self.handle_suback(packet), loop=self._loop)
-                        # elif packet.fixed_header.packet_type == UNSUBACK:
-                        #     task = ensure_future(self.handle_unsuback(packet), loop=self._loop)
                         elif packet.fixed_header.packet_type == DISCONNECT:
                             task = ensure_future(self.handle_disconnect(packet), loop=self._loop)
                         else:
@@ -200,14 +187,15 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
     async def _consume_write(self):
         while self._transport is not None:
             packet = await self._queue.get()
-            if self._transport is None or packet is None:
-                break
-            if not await self._send_packet(packet):
+            if packet.protocol_ts is not None and time.time() - packet.protocol_ts >= self._keepalive_timeout / 4:
+                continue
+            if self._transport is None or not await self._send_packet(packet):
                 await self._queue.put(packet)
                 break
             
     async def _send_packet(self, packet):
         try:
+            packet.protocol_ts = time.time()
             await packet.to_stream(self._stream_writer)
             return True
         except ConnectionResetError:
@@ -277,9 +265,6 @@ class MQTTServerProtocol(FlowControlMixin, asyncio.Protocol):
             target.deliver(chunk)
         else:
             logging.warning("Invalid chunk, packet will be ignored.")
-
-    async def handle_pingresp(self, pingresp: PingRespPacket):
-        logging.info("Received PingRespPacket from mqtt client.")
 
     async def handle_pingreq(self, pingreq: PingReqPacket):
         logging.info("Received PingRepPacket from mqtt client, replying PingRespPacket.")

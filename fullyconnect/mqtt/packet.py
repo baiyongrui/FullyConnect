@@ -6,8 +6,8 @@ import asyncio
 from fullyconnect.mqtt_codecs import bytes_to_hex_str, decode_packet_id, int_to_bytes, read_or_raise
 from fullyconnect.errors import CodecException, MQTTException, NoDataException
 from fullyconnect.adapters import ReaderAdapter, WriterAdapter
-from datetime import datetime
 from struct import unpack
+import time
 
 
 RESERVED_0 = 0x00
@@ -192,7 +192,7 @@ class MQTTPacket:
     def to_stream(self, writer: asyncio.StreamWriter):
         writer.write(self.to_bytes())
         yield from writer.drain()
-        self.protocol_ts = datetime.now()
+        self.protocol_ts = time.time()
 
     def to_bytes(self) -> bytes:
         if self.variable_header:
@@ -211,10 +211,10 @@ class MQTTPacket:
 
     @classmethod
     @asyncio.coroutine
-    def from_stream(cls, reader: ReaderAdapter, fixed_header=None, variable_header=None, drop_variable_header=False):
+    def from_stream(cls, reader: ReaderAdapter, fixed_header=None, variable_header=None, skip_variable_header=False):
         if fixed_header is None:
             fixed_header = yield from cls.FIXED_HEADER.from_stream(reader)
-        if cls.VARIABLE_HEADER and not drop_variable_header:
+        if cls.VARIABLE_HEADER and not skip_variable_header:
             if variable_header is None:
                 variable_header = yield from cls.VARIABLE_HEADER.from_stream(reader, fixed_header)
         else:
@@ -230,7 +230,7 @@ class MQTTPacket:
             instance = cls(fixed_header, variable_header)
         else:
             instance = cls(fixed_header, variable_header, payload)
-        instance.protocol_ts = datetime.now()
+        instance.protocol_ts = time.time()
         return instance
 
     @property
