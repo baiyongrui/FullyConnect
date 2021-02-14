@@ -1,13 +1,8 @@
 import asyncio
 import logging
-
 from fullyconnect import cryptor, common
 
 logger = logging.getLogger(__name__)
-
-STAGE_INIT = 0
-STAGE_ADDR = 1
-STAGE_STREAM = 2
 
 
 class TCPRelayServer:
@@ -34,10 +29,8 @@ class RelayServerProtocol(asyncio.Protocol):
         self._loop = loop
         self._transport = None
         self._encryptor = cryptor.Cryptor(config['password'], config['method'])
-        self._stage = STAGE_ADDR
-        self._remote = None
-
         self._peername = None
+        self._remote = None
         self._last_activity = 0
         self._timeout = config['timeout']
         self._timeout_handle = None
@@ -51,7 +44,7 @@ class RelayServerProtocol(asyncio.Protocol):
     def connection_lost(self, exc):
         print("client {0} connection lost.".format(self._peername))
         self._transport = None
-        if self._stage == STAGE_STREAM:
+        if self._remote:
             self._remote.close()
             self._remote = None
         self._timeout_handle.cancel()
@@ -65,10 +58,26 @@ class RelayServerProtocol(asyncio.Protocol):
 
         self._last_activity = self._loop.time()
 
-        if self._stage == STAGE_STREAM:
-            self.handle_stage_stream(data)
-        elif self._stage == STAGE_ADDR:
-            self.handle_stage_addr(data)
+        if self._remote:
+            self._remote.write(data)
+        else:
+            header_result = common.parse_header(data)
+            if header_result is None:
+                logger.error("can not parse header when handling connection from {0}:{1}"
+                             .format(self._peername[0], self._peername[1]))
+                self._transport.close()
+                return
+
+            addrtype, remote_addr, remote_port, header_length = header_result
+            logger.info('connecting to %s:%d from %s:%d' %
+                        (common.to_str(remote_addr), remote_port,
+                         self._peername[0], self._peername[1]))
+
+            self._remote = RelayRemoteProtocol(self)
+            self._loop.create_task(self.create_connection(common.to_str(remote_addr), remote_port))
+
+            if len(data) > header_length:
+                self._remote.write(data[header_length:])
 
     # handle remote read
     def write(self, data):
@@ -76,26 +85,6 @@ class RelayServerProtocol(asyncio.Protocol):
         self._transport.write(data)
 
         self._last_activity = self._loop.time()
-
-    def handle_stage_addr(self, data):
-        header_result = common.parse_header(data)
-        if header_result is None:
-            logger.error("can not parse header when handling connection from {0}:{1}"
-                          .format(self._peername[0], self._peername[1]))
-            self._transport.close()
-            return
-
-        addrtype, remote_addr, remote_port, header_length = header_result
-        logger.info('connecting to %s:%d from %s:%d' %
-                    (common.to_str(remote_addr), remote_port,
-                    self._peername[0], self._peername[1]))
-
-        self._remote = RelayRemoteProtocol(self)
-        self._loop.create_task(self.create_connection(common.to_str(remote_addr), remote_port))
-
-        self._stage = STAGE_STREAM
-        if len(data) > header_length:
-            self._remote.write(data[header_length:])
 
     async def create_connection(self, host, port):
         try:
@@ -105,11 +94,8 @@ class RelayServerProtocol(asyncio.Protocol):
             logger.error("{0} when connecting to {1}:{2} from {3}:{4}".format(e, host, port, self._peername[0], self._peername[1]))
             self.close()
 
-    def handle_stage_stream(self, data):
-        self._remote.write(data)
-
     def close(self):
-        if self._transport is not None:
+        if self._transport:
             self._transport.close()
 
     def timeout_handler(self):
@@ -126,7 +112,6 @@ class RelayRemoteProtocol(asyncio.Protocol):
     def __init__(self, server):
         self._transport = None
         self._write_pending_data = []
-        self._connected = False
         self._server = server
 
         self._peername = None
@@ -134,7 +119,6 @@ class RelayRemoteProtocol(asyncio.Protocol):
     def connection_made(self, transport):
         self._peername = transport.get_extra_info('peername')
         self._transport = transport
-        self._connected = True
 
         if self._server is None:
             self._transport.close()
@@ -148,7 +132,7 @@ class RelayRemoteProtocol(asyncio.Protocol):
     def connection_lost(self, exc):
         print("remote {0} connection lost.".format(self._peername))
         self._transport = None
-        if self._server is not None:
+        if self._server:
             self._server.close()
             self._server = None
 
@@ -156,14 +140,10 @@ class RelayRemoteProtocol(asyncio.Protocol):
         self._server.write(data)
 
     def write(self, data):
-        if not self._connected:
-            self._write_pending_data.append(data)
-        else:
-            # if len(self._write_pending_data) > 0:
-            #     self._write_pending_data.append(data)
-            #     data = b''.join(self._write_pending_data)
-            #     self._write_pending_data = []
+        if self._transport:
             self._transport.write(data)
+        else:
+            self._write_pending_data.append(data)
 
     def close(self):    # closed by local
         self._server = None
