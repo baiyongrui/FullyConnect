@@ -4,6 +4,9 @@ import logging
 
 from fullyconnect import cryptor, common
 
+logging.basicConfig(level=logging.DEBUG,
+                    format='%(asctime)s %(levelname)-8s %(message)s',
+                    datefmt='%Y-%m-%d %H:%M:%S')
 logger = logging.getLogger(__name__)
 
 
@@ -48,20 +51,18 @@ class RelayServerProtocol(asyncio.DatagramProtocol):
                                                 self._method,
                                                 data)
         except Exception:
-            logger.debug('UDP handle_server: decrypt data failed')
+            logging.error('decrypt data failed')
             return
         if not data:
-            logger.debug('UDP handle_server: data is empty after decrypt')
             return
         header_result = common.parse_header(data)
         if header_result is None:
-            logger.error("can not parse header when handling connection from {0}"
-                          .format(addr))
+            logging.error(f"can not parse header when handling connection from {addr}")
             return
         addrtype, remote_addr, remote_port, header_length = header_result
-        logger.info("udp data to {0}:{1} from {2}:{3}".format(remote_addr, remote_port, addr[0], addr[1]))
+        logging.debug(f"udp data to {remote_addr}:{remote_port} from {addr[0]}:{addr[1]}")
 
-        client_key = "{0}:{1}".format(addr[0], addr[1])
+        client_key = f"{addr[0]}:{addr[1]}"
         remote = self._sessions.get(client_key, None)
         if not remote:
             remote = RelayRemoteProtocol(self, addr)
@@ -75,7 +76,7 @@ class RelayServerProtocol(asyncio.DatagramProtocol):
         try:
             await self._loop.create_datagram_endpoint(lambda: remote, remote_addr=(host, port))
         except OSError as e:
-            logger.error("{0}".format(e))
+            logging.error(f"{e} when creating endpoint to {host}:{port}")
 
     def write(self, data, addr, r_addr):
         # try:
@@ -85,7 +86,7 @@ class RelayServerProtocol(asyncio.DatagramProtocol):
         self._transport.sendto(data, addr)
 
     def clear_session(self, client_addr):
-        client_key = "{0}:{1}".format(client_addr[0], client_addr[1])
+        client_key = f"{client_addr[0]}:{client_addr[1]}"
         del self._sessions[client_key]
 
 
@@ -134,7 +135,7 @@ class RelayRemoteProtocol(asyncio.DatagramProtocol):
     def timeout_handler(self):
         after = self._last_activity - self._server.loop.time() + self._timeout
         if after < 0:
-            logger.warning("session {0}:{1} closed".format(self._client_addr[0], self._client_addr[1]))
+            logging.info(f"session {self._client_addr[0]}:{self._client_addr[1]} closed")
             self._transport.close()
         else:
             self._timeout_handle = self._server.loop.call_later(after, self.timeout_handler)

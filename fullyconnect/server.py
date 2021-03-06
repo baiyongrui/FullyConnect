@@ -40,7 +40,7 @@ def main():
         a_config['password'] = password
         logging.info("starting server at %s:%d" %
                      (a_config['server'], int(port)))
-        tcp_servers.append(tcprelay.TCPRelayServer(a_config))
+        tcp_servers.append(tcprelay.TCPRelay(a_config))
         udp_servers.append(udprelay.UDPRelayServer(a_config))
 
     def run_server():

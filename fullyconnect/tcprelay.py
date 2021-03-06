@@ -2,10 +2,13 @@ import asyncio
 import logging
 from fullyconnect import cryptor, common
 
+logging.basicConfig(level=logging.DEBUG,
+                    format='%(asctime)s %(levelname)-8s %(message)s',
+                    datefmt='%Y-%m-%d %H:%M:%S')
 logger = logging.getLogger(__name__)
 
 
-class TCPRelayServer:
+class TCPRelay:
 
     def __init__(self, config):
         self._loop = None
@@ -42,15 +45,17 @@ class RelayServerProtocol(asyncio.Protocol):
         self._timeout_handle = self._loop.call_later(self._timeout, self.timeout_handler)
 
     def connection_lost(self, exc):
-        print("client {0} connection lost.".format(self._peername))
+        logging.info(f"client {self._peername} connection lost.")
         self._transport = None
         if self._remote:
             self._remote.close()
-            self._remote = None
         self._timeout_handle.cancel()
         self._timeout_handle = None
 
     def data_received(self, data):
+        if not self._transport or self._transport.is_closing():
+            return
+
         data = self._encryptor.decrypt(data)
         if not data:
             self.close()
@@ -63,15 +68,14 @@ class RelayServerProtocol(asyncio.Protocol):
         else:
             header_result = common.parse_header(data)
             if header_result is None:
-                logger.error("can not parse header when handling connection from {0}:{1}"
-                             .format(self._peername[0], self._peername[1]))
+                logging.error(
+                    f"can not parse header when handling connection from {self._peername[0]}:{self._peername[1]}")
                 self._transport.close()
                 return
 
             addrtype, remote_addr, remote_port, header_length = header_result
-            logger.info('connecting to %s:%d from %s:%d' %
-                        (common.to_str(remote_addr), remote_port,
-                         self._peername[0], self._peername[1]))
+            logging.info(
+                f"connecting to {common.to_str(remote_addr)}:{remote_port} from {self._peername[0]}:{self._peername[1]}")
 
             self._remote = RelayRemoteProtocol(self)
             self._loop.create_task(self.create_connection(common.to_str(remote_addr), remote_port))
@@ -88,10 +92,10 @@ class RelayServerProtocol(asyncio.Protocol):
 
     async def create_connection(self, host, port):
         try:
-            #TODO handle pending task
+            # TODO handle pending task
             transport, protocol = await self._loop.create_connection(lambda: self._remote, host, port)
         except OSError as e:
-            logger.error("{0} when connecting to {1}:{2} from {3}:{4}".format(e, host, port, self._peername[0], self._peername[1]))
+            logging.error(f"{e} when connecting to {host}:{port} from {self._peername[0]}:{self._peername[1]}")
             self.close()
 
     def close(self):
@@ -101,7 +105,7 @@ class RelayServerProtocol(asyncio.Protocol):
     def timeout_handler(self):
         after = self._last_activity - self._loop.time() + self._timeout
         if after < 0:
-            logger.warning("connection from {0}:{1} timeout".format(self._peername[0], self._peername[1]))
+            logging.info("connection from {0}:{1} timeout".format(self._peername[0], self._peername[1]))
             self.close()
         else:
             self._timeout_handle = self._loop.call_later(after, self.timeout_handler)
@@ -109,7 +113,7 @@ class RelayServerProtocol(asyncio.Protocol):
 
 class RelayRemoteProtocol(asyncio.Protocol):
 
-    def __init__(self, server):
+    def __init__(self, server: RelayServerProtocol):
         self._transport = None
         self._write_pending_data = []
         self._server = server
@@ -130,7 +134,7 @@ class RelayRemoteProtocol(asyncio.Protocol):
             self._transport.write(data)
 
     def connection_lost(self, exc):
-        print("remote {0} connection lost.".format(self._peername))
+        logging.info("remote {0} connection lost.".format(self._peername))
         self._transport = None
         if self._server:
             self._server.close()
@@ -152,7 +156,7 @@ class RelayRemoteProtocol(asyncio.Protocol):
 
 
 if __name__ == '__main__':
-    server = TCPRelayServer({"password": "123456", "method": "aes-128-cfb", "timeout": 60, "port": 1370})
+    server = TCPRelay({"password": "123456", "method": "aes-128-cfb", "timeout": 60, "port": 8700})
     # import uvloop
     # loop = uvloop.new_event_loop()
     # asyncio.set_event_loop(loop)
