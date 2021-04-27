@@ -2,7 +2,7 @@ import asyncio
 import struct
 import logging
 
-from fullyconnect import cryptor, common
+import cryptor, common
 
 logging.basicConfig(level=logging.DEBUG,
                     format='%(asctime)s %(levelname)-8s %(message)s',

@@ -1,6 +1,7 @@
 import asyncio
+from asyncio import ensure_future, Queue
 import logging
-from fullyconnect import cryptor, common
+import cryptor, common
 
 logging.basicConfig(level=logging.DEBUG,
                     format='%(asctime)s %(levelname)-8s %(message)s',
@@ -38,11 +39,16 @@ class RelayServerProtocol(asyncio.Protocol):
         self._timeout = config['timeout']
         self._timeout_handle = None
 
+        self._write_task = None
+        self._queue = Queue(maxsize=1024, loop=self._loop)
+
     def connection_made(self, transport):
         self._peername = transport.get_extra_info('peername')
         self._transport = transport
         self._last_activity = self._loop.time()
         self._timeout_handle = self._loop.call_later(self._timeout, self.timeout_handler)
+
+        self._write_task = self._loop.create_task(self._consume_to_write())
 
     def connection_lost(self, exc):
         logging.info(f"client {self._peername} connection lost.")
@@ -51,6 +57,8 @@ class RelayServerProtocol(asyncio.Protocol):
             self._remote.close()
         self._timeout_handle.cancel()
         self._timeout_handle = None
+        if self._write_task:
+            self._write_task.cancel()
 
     def data_received(self, data):
         if not self._transport or self._transport.is_closing():
@@ -83,12 +91,19 @@ class RelayServerProtocol(asyncio.Protocol):
             if len(data) > header_length:
                 self._remote.write(data[header_length:])
 
-    # handle remote read
-    def write(self, data):
-        data = self._encryptor.encrypt(data)
-        self._transport.write(data)
+    async def _consume_to_write(self):
+        while self._transport is not None:
+            data = await self._queue.get()
+            if self._transport is None:
+                break
+            self._transport.write(data)
+            self._last_activity = self._loop.time()
 
-        self._last_activity = self._loop.time()
+    async def enqueue_to_write(self, data):
+        if self._transport is None or self._transport.is_closing():
+            return
+        data = self._encryptor.encrypt(data)
+        await self._queue.put(data)
 
     async def create_connection(self, host, port):
         try:
@@ -117,8 +132,13 @@ class RelayRemoteProtocol(asyncio.Protocol):
         self._transport = None
         self._write_pending_data = []
         self._server = server
+        self._loop = asyncio.get_event_loop()
 
         self._peername = None
+
+        self._last_activity = 0     # for read timeout
+        self._timeout = 60      # TODO: from config
+        self._timeout_handler = None
 
     def connection_made(self, transport):
         self._peername = transport.get_extra_info('peername')
@@ -133,6 +153,9 @@ class RelayRemoteProtocol(asyncio.Protocol):
             self._write_pending_data = []
             self._transport.write(data)
 
+        self._last_activity = self._loop.time()
+        self._timeout_handler = self._loop.call_later(self._timeout, self.timeout_handler)
+
     def connection_lost(self, exc):
         logging.info("remote {0} connection lost.".format(self._peername))
         self._transport = None
@@ -140,8 +163,26 @@ class RelayRemoteProtocol(asyncio.Protocol):
             self._server.close()
             self._server = None
 
+        if self._timeout_handler is not None:
+            self._timeout_handler.cancel()
+            self._timeout_handler = None
+
     def data_received(self, data):
-        self._server.write(data)
+        if self._transport is None:
+            return
+        self._transport.pause_reading()
+        task = ensure_future(self.relay_data(data), loop=self._loop)
+
+        def maybe_resume_reading(_):
+            if self._transport is not None:
+                self._transport.resume_reading()
+        
+        task.add_done_callback(maybe_resume_reading)
+
+        self._last_activity = self._loop.time()
+
+    async def relay_data(self, data: bytes):
+        await self._server.enqueue_to_write(data)
 
     def write(self, data):
         if self._transport:
@@ -153,6 +194,14 @@ class RelayRemoteProtocol(asyncio.Protocol):
         self._server = None
         if self._transport:
             self._transport.close()
+
+    def timeout_handler(self):
+        after = self._last_activity - self._loop.time() + self._timeout
+        if after < 0:
+            logging.info("Target connection {}{} timeout".format(self._connection_id, self._peername))
+            self.close()
+        else:
+            self._timeout_handle = self._loop.call_later(after, self.timeout_handler)
 
 
 if __name__ == '__main__':

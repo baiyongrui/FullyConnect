@@ -6,7 +6,7 @@
 #
 
 import hashlib
-from fullyconnect.crypto import openssl
+from crypto import openssl
 
 __all__ = ['ciphers']
 

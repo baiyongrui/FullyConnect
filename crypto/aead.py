@@ -3,9 +3,8 @@ from ctypes import c_int, create_string_buffer, byref, c_void_p
 import hashlib
 from struct import pack, unpack
 
-from fullyconnect.crypto import util
-from fullyconnect.crypto import hkdf
-from fullyconnect.common import ord, chr
+from crypto import util, hkdf
+from common import ord, chr
 
 
 EVP_CTRL_GCM_SET_IVLEN = 0x9

@@ -3,8 +3,8 @@ import sys
 import hashlib
 import logging
 
-from fullyconnect import common
-from fullyconnect.crypto import rc4_md5, openssl, sodium
+import common
+from crypto import rc4_md5, openssl, sodium
 
 
 CIPHER_ENC_ENCRYPTION = 1

@@ -7,8 +7,8 @@ import traceback
 
 from functools import wraps
 
-from fullyconnect.common import to_bytes, to_str, IPNetwork
-from fullyconnect import cryptor
+from common import to_bytes, to_str, IPNetwork
+import cryptor
 
 VERBOSE_LEVEL = 5
 

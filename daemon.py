@@ -20,7 +20,7 @@ import sys
 import logging
 import signal
 import time
-from fullyconnect import common, shell
+import common, shell
 
 
 def daemon_exec(config):

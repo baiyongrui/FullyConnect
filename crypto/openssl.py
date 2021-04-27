@@ -4,10 +4,9 @@ from __future__ import absolute_import, division, print_function, \
 from ctypes import c_char_p, c_int, c_long, byref,\
     create_string_buffer, c_void_p
 
-from fullyconnect import common
-from fullyconnect.crypto import util
-from fullyconnect.crypto.aead import AeadCryptoBase, EVP_CTRL_AEAD_SET_IVLEN, \
-    EVP_CTRL_AEAD_GET_TAG, EVP_CTRL_AEAD_SET_TAG
+import common
+from crypto import util
+from crypto.aead import AeadCryptoBase, EVP_CTRL_AEAD_SET_IVLEN, EVP_CTRL_AEAD_GET_TAG, EVP_CTRL_AEAD_SET_TAG
 
 __all__ = ['ciphers']
 
