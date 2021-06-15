@@ -1,5 +1,7 @@
 import asyncio
 from asyncio import ensure_future, Queue
+from asyncio.streams import FlowControlMixin
+from asyncio.tasks import sleep
 import logging
 import cryptor, common
 
@@ -27,9 +29,10 @@ class TCPRelay:
         self._loop.run_until_complete(self._server.wait_closed())
 
 
-class RelayServerProtocol(asyncio.Protocol):
+class RelayServerProtocol(FlowControlMixin, asyncio.Protocol):
 
     def __init__(self, loop, config):
+        super().__init__(loop=loop)
         self._loop = loop
         self._transport = None
         self._encryptor = cryptor.Cryptor(config['password'], config['method'])
@@ -40,7 +43,7 @@ class RelayServerProtocol(asyncio.Protocol):
         self._timeout_handle = None
 
         self._write_task = None
-        self._queue = Queue(maxsize=1024, loop=self._loop)
+        self._queue = Queue(maxsize=512, loop=self._loop)
 
     def connection_made(self, transport):
         self._peername = transport.get_extra_info('peername')
@@ -51,6 +54,8 @@ class RelayServerProtocol(asyncio.Protocol):
         self._write_task = self._loop.create_task(self._consume_to_write())
 
     def connection_lost(self, exc):
+        super().connection_lost(exc)
+
         logging.info(f"client {self._peername} connection lost.")
         self._transport = None
         if self._remote:
@@ -96,8 +101,23 @@ class RelayServerProtocol(asyncio.Protocol):
             data = await self._queue.get()
             if self._transport is None:
                 break
-            self._transport.write(data)
+            await self._send_data(data)
             self._last_activity = self._loop.time()
+
+    async def _send_data(self, data):
+        self._transport.write(data)
+        if self._transport.is_closing():
+            # Wait for protocol.connection_lost() call
+            # Raise connection closing error if any,
+            # ConnectionResetError otherwise
+            # Yield to the event loop so connection_lost() may be
+            # called.  Without this, _drain_helper() would return
+            # immediately, and code that calls
+            #     write(...); await drain()
+            # in a loop would never call connection_lost(), so it
+            # would not see an error when the socket is closed.
+            await sleep(0)
+        await self._drain_helper()
 
     async def enqueue_to_write(self, data):
         if self._transport is None or self._transport.is_closing():
