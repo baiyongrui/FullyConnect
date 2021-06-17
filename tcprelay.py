@@ -140,7 +140,7 @@ class RelayServerProtocol(FlowControlMixin, asyncio.Protocol):
     def timeout_handler(self):
         after = self._last_activity - self._loop.time() + self._timeout
         if after < 0:
-            logging.info("connection from {0}:{1} timeout".format(self._peername[0], self._peername[1]))
+            logging.info(f"connection from {self._peername[0]}:{self._peername[1]} timeout")
             self.close()
         else:
             self._timeout_handle = self._loop.call_later(after, self.timeout_handler)
@@ -190,6 +190,10 @@ class RelayRemoteProtocol(asyncio.Protocol):
     def data_received(self, data):
         if self._transport is None:
             return
+        if self._server is None:
+            self._transport.close()
+            return
+
         self._transport.pause_reading()
         task = ensure_future(self.relay_data(data), loop=self._loop)
 
