@@ -100,6 +100,7 @@ class RelayServerProtocol(FlowControlMixin, asyncio.Protocol):
         while self._transport is not None:
             data = await self._queue.get()
             if self._transport is None:
+                self.clear_queue()
                 break
             await self._send_data(data)
             self._last_activity = self._loop.time()
@@ -132,6 +133,13 @@ class RelayServerProtocol(FlowControlMixin, asyncio.Protocol):
         except OSError as e:
             logging.error(f"{e} when connecting to {host}:{port} from {self._peername[0]}:{self._peername[1]}")
             self.close()
+
+    def clear_queue(self):
+        while not self._queue.empty():
+            try:
+                self._queue.get_nowait()
+            except:
+                break
 
     def close(self):
         if self._transport:
@@ -177,7 +185,7 @@ class RelayRemoteProtocol(asyncio.Protocol):
         self._timeout_handler = self._loop.call_later(self._timeout, self.timeout_handler)
 
     def connection_lost(self, exc):
-        logging.info("remote {0} connection lost.".format(self._peername))
+        logging.info(f"remote {self._peername} connection lost.")
         self._transport = None
         if self._server:
             self._server.close()
